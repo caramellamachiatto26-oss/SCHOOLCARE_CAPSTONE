@@ -56,7 +56,7 @@ Required:
 Optional (have safe defaults if omitted):
 - `JWT_EXPIRE` — how long a login token stays valid (default: `1d`)
 - `PORT` — local server port (default: `5000`; most hosts like Railway set this automatically)
-- `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD` — used only by the admin-seeding script below (default: `admin@clinic.com` / `admin123`, fine for local dev only — set real values before seeding a production database)
+- `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD` — used only by the admin-seeding script below (has a default fallback fine for local dev only — see the script's source for the exact default, and always set real values before seeding a production database)
 
 The server checks for `MONGO_URI` and `JWT_SECRET` on startup (and before the test suite runs) and refuses to continue with a clear error message if either is missing.
 
@@ -74,7 +74,7 @@ There is no public registration route — accounts are created by an existing ad
 npm run seed-admin
 ```
 
-This creates `admin@clinic.com` / `admin123` directly in your database (or your configured `SEED_ADMIN_EMAIL`/`SEED_ADMIN_PASSWORD`). **Change this password once you're logged in.** The script checks for an existing admin with that email first and does nothing if one already exists — safe to re-run if you ever lose access.
+This creates the default local-dev admin account (or your configured `SEED_ADMIN_EMAIL`/`SEED_ADMIN_PASSWORD`, if set). **Change this password immediately after your first login, especially in any shared or deployed environment.** The script checks for an existing admin with that email first and does nothing if one already exists — safe to re-run if you ever lose access.
 
 ### 4. Run the server
 
