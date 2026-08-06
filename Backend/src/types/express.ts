@@ -5,6 +5,10 @@ declare global {
     interface Request {
       /** Set by `protect` after JWT verification. */
       user?: AuthUser;
+      /** Current database-backed Terms and Agreement acceptance state. */
+      termsAccepted?: boolean;
+      /** Correlates the HTTP response with structured server logs. */
+      requestId?: string;
     }
   }
 }

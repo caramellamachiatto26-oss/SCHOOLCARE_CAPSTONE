@@ -56,7 +56,7 @@ Required:
 Optional (have safe defaults if omitted):
 - `JWT_EXPIRE` — how long a login token stays valid (default: `1d`)
 - `PORT` — local server port (default: `5000`; most hosts like Railway set this automatically)
-- `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD` — used only by the admin-seeding script below (has a default fallback fine for local dev only — see the script's source for the exact default, and always set real values before seeding a production database)
+- `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD` — used only by the admin-seeding script below (default: `admin@clinic.com` / `admin123`, fine for local dev only — set real values before seeding a production database)
 
 The server checks for `MONGO_URI` and `JWT_SECRET` on startup (and before the test suite runs) and refuses to continue with a clear error message if either is missing.
 
@@ -74,7 +74,7 @@ There is no public registration route — accounts are created by an existing ad
 npm run seed-admin
 ```
 
-This creates the default local-dev admin account (or your configured `SEED_ADMIN_EMAIL`/`SEED_ADMIN_PASSWORD`, if set). **Change this password immediately after your first login, especially in any shared or deployed environment.** The script checks for an existing admin with that email first and does nothing if one already exists — safe to re-run if you ever lose access.
+This creates `admin@clinic.com` / `admin123` directly in your database (or your configured `SEED_ADMIN_EMAIL`/`SEED_ADMIN_PASSWORD`). **Change this password once you're logged in.** The script checks for an existing admin with that email first and does nothing if one already exists — safe to re-run if you ever lose access.
 
 ### 4. Run the server
 
@@ -260,7 +260,15 @@ All validation schemas live in `src/validators/schemas.ts` — and are the same 
 
 All errors flow through one centralized handler (`src/middleware/error.middleware.ts`). Controllers throw an `AppError(message, statusCode)` and pass it to `next()`; the handler logs the error and sends back only a short, safe message to the client — never a raw stack trace. Unmatched routes return a clean JSON 404 instead of Express's default HTML error page.
 
-Logging is handled by Winston (`src/utils/logger.ts`), console-only by design: this app targets Render, whose filesystem is ephemeral (anything written to disk disappears on every redeploy), so logs are meant to be read from Render's own dashboard rather than from a local file. 4xx errors (validation failures, access denied, not found) log as warnings; 5xx errors (something actually broke) log with full detail.
+Logging is handled by Winston (`src/utils/logger.ts`), console-only by design: this app targets Render, whose filesystem is ephemeral (anything written to disk disappears on every redeploy), so logs are meant to be read from Render's own dashboard rather than from a local file.
+
+- Production emits one-line JSON that Render can search by `level`, `requestId`, `statusCode`, `role`, `service`, and `release`.
+- Local development emits readable colorized lines.
+- Every response includes `X-Request-ID`; a 5xx response also returns the same value as `errorId`, making it easy to find the matching terminal or Render log.
+- Request bodies and query strings are never logged. Credentials, tokens, email addresses, and clinical fields are redacted from metadata.
+- Successful health checks are `debug` level to avoid filling Render logs; 4xx responses are warnings and 5xx responses are errors.
+
+Set `LOG_LEVEL=debug` locally when troubleshooting, then return it to `info` in production. To watch local logs, run `npm run dev`. On Render, open the backend service and select **Logs**; searching the `errorId` shown to a user finds the matching server event.
 
 ---
 
@@ -303,7 +311,7 @@ schemas.ts        Zod schemas - single source of truth for both validation and A
 utils/
 pagination.ts     shared page/limit/skip parsing and metadata building
 regex.ts          escapes user search input before it's used in a $regex query
-logger.ts         Winston logger (console-only, Railway-friendly)
+logger.ts         Winston logger (structured, redacted, and Render-friendly)
 validateEnv.ts    fails fast at startup if required env vars are missing
 auditLog.ts       fire-and-forget helper that writes one audit log entry
 reportDocx.ts     builds the .docx clinic summary report
