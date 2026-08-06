@@ -1,5 +1,4 @@
-// Small hand-rolled line icons so the UI doesn't need an icon library dependency.
-// Each icon accepts a className so callers control size and color via Tailwind.
+// Dependency-free icons styled through className.
 
 type IconProps = { className?: string };
 
@@ -99,12 +98,49 @@ export function PlusCircleIcon({ className = "w-5 h-5" }: IconProps) {
   );
 }
 
+export function CalendarIcon({ className = "w-5 h-5" }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} className={className}>
+      <rect x="3" y="5" width="18" height="16" rx="2" />
+      <path d="M3 9h18M8 3v4M16 3v4" />
+      <circle cx="8" cy="14" r="1" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="14" r="1" fill="currentColor" stroke="none" />
+      <circle cx="16" cy="14" r="1" fill="currentColor" stroke="none" />
+    </svg>
+  );
+}
+
+export function BellIcon({ className = "w-5 h-5" }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} className={className}>
+      <path d="M6 8a6 6 0 1 1 12 0c0 4.5 1.5 6 2 6.5H4c.5-.5 2-2 2-6.5Z" />
+      <path d="M9.5 18.5a2.5 2.5 0 0 0 5 0" />
+    </svg>
+  );
+}
+
 export function CartIcon({ className = "w-5 h-5" }: IconProps) {
   return (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} className={className}>
       <path d="M3 4h2l2.4 12.4a1.5 1.5 0 0 0 1.5 1.2h8.2a1.5 1.5 0 0 0 1.5-1.2L20.5 8H6" />
       <circle cx="9.5" cy="20" r="1.4" />
       <circle cx="17" cy="20" r="1.4" />
+    </svg>
+  );
+}
+
+export function MenuIcon({ className = "w-5 h-5" }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} className={className}>
+      <path d="M4 7h16M4 12h16M4 17h16" />
+    </svg>
+  );
+}
+
+export function CloseIcon({ className = "w-5 h-5" }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} className={className}>
+      <path d="m6 6 12 12M18 6 6 18" />
     </svg>
   );
 }
