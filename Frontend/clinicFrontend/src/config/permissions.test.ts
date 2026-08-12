@@ -17,7 +17,22 @@ describe("permissions", () => {
 
   it("keeps route access aligned with nav expectations", () => {
     expect(hasRole("staff", ROUTE_ACCESS["/appointments"])).toBe(true);
-    expect(hasRole("staff", ROUTE_ACCESS["/patients"])).toBe(false);
+    // Staff receive a basic read-only patient view.
+    expect(hasRole("staff", ROUTE_ACCESS["/patients"])).toBe(true);
     expect(hasRole("admin", ROUTE_ACCESS["/audit-log"])).toBe(true);
+    expect(hasRole("admin", ROUTE_ACCESS["/patients/:id"])).toBe(false);
+    expect(hasRole("admin", ROUTE_ACCESS["/patient-queue"])).toBe(false);
+    expect(hasRole("admin", ROUTE_ACCESS["/appointments"])).toBe(false);
+    expect(hasRole("doctor", ROUTE_ACCESS["/clinical-workspace"])).toBe(true);
+    expect(hasRole("nurse", ROUTE_ACCESS["/clinical-workspace"])).toBe(true);
+    expect(hasRole("staff", ROUTE_ACCESS["/clinical-workspace"])).toBe(false);
+  });
+
+  it("allows staff and nurses to register student information", () => {
+    expect(can("staff", "editPatients")).toBe(true);
+    expect(can("nurse", "editPatients")).toBe(true);
+    expect(can("doctor", "editPatients")).toBe(false);
+    expect(hasRole("staff", ROUTE_ACCESS["/patients"])).toBe(true);
+    expect(hasRole("nurse", ROUTE_ACCESS["/patients"])).toBe(true);
   });
 });
