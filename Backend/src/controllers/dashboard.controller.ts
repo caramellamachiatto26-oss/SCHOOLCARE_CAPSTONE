@@ -19,6 +19,8 @@ export const getDashboardStats = async (req: Request, res: Response, next: NextF
     delete operationalStats.analyticsPatientType;
     delete operationalStats.analyticsTotalVisits;
     delete operationalStats.analyticsVisitBreakdown;
+    delete operationalStats.bmiRecordedCount;
+    delete operationalStats.bmiBreakdown;
     if (actor.role === "admin" || actor.role === "staff") {
       // Non-clinical dashboards receive only operational workload data, not analytics or inventory data.
       stats.recentCases = [];
@@ -36,8 +38,20 @@ export const getDashboardStats = async (req: Request, res: Response, next: NextF
   }
 };
 
+export const getSuperAdminDashboard = async (_req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    const summary = await dashboardService.getSuperAdminSummary();
+    res.status(200).json({ success: true, message: "Super Admin dashboard retrieved successfully", data: summary });
+  } catch (error) {
+    next(error);
+  }
+};
+
 export const getAnalyticsStats = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
+    // Analytics changes whenever a clinical visit is saved; prevent browsers and
+    // deployment proxies from serving a stale pre-save snapshot.
+    res.set("Cache-Control", "no-store");
     const requestedType = (req.query.patientType ?? "all") as string;
     if (!["all", "student", "teacher", "staff"].includes(requestedType)) {
       throw new AppError("patientType must be all, student, teacher, or staff", 400);
