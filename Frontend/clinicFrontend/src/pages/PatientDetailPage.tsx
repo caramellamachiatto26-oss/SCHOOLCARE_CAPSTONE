@@ -7,9 +7,18 @@ import PrintablePatientSummary from "../features/patients/PrintablePatientSummar
 import { useAuth } from "../hooks/useAuth";
 import { api } from "../services/api";
 import type { Patient, ClinicVisit, MedicalHistory } from "../utils/types";
+import ClinicalProfileEditor from "../features/patients/ClinicalProfileEditor";
+import { academicLevelLabel, educationLevelLabel, educationLevelOf, patientIdentifier, patientTypeLabel, patientTypeOf } from "../utils/patient";
 
-function PatientDetailPage() {
-  const { id } = useParams<{ id: string }>();
+function PatientDetailPage({
+  patientId,
+  embedded = false,
+}: {
+  patientId?: string;
+  embedded?: boolean;
+} = {}) {
+  const { id: routePatientId } = useParams<{ id: string }>();
+  const id = patientId ?? routePatientId;
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const { can, role } = useAuth();
@@ -20,9 +29,13 @@ function PatientDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  // Load independent data for the printable summary.
-  const [printVisits, setPrintVisits] = useState<ClinicVisit[]>([]);
+  // Print data is loaded on demand so the visible record components remain the
+  // only consumers fetching visits and history during normal viewing.
+  const [printVisits, setPrintVisits] = useState<ClinicVisit[] | null>(null);
   const [printHistory, setPrintHistory] = useState<MedicalHistory[] | null>(null);
+  const [printLoading, setPrintLoading] = useState(false);
+  const [printError, setPrintError] = useState("");
+  const [printRequested, setPrintRequested] = useState(false);
   const requestedReturnTo = searchParams.get("returnTo");
   const safeReturnTo =
     requestedReturnTo?.startsWith("/") && !requestedReturnTo.startsWith("//")
@@ -38,64 +51,120 @@ function PatientDetailPage() {
       .finally(() => setLoading(false));
   }, [id]);
 
-  useEffect(() => {
-    api.get<ClinicVisit[]>(`/visits/patient/${id}`).then((r) => setPrintVisits(r.data)).catch(() => {});
-  }, [id]);
+  const handlePrint = async () => {
+    if (printLoading || !id) return;
+    setPrintLoading(true);
+    setPrintError("");
+    try {
+      const [visitsResponse, historyResponse] = await Promise.all([
+        api.getAll<ClinicVisit>(`/visits/patient/${id}`),
+        canViewMedicalHistory
+          ? api.getAll<MedicalHistory>(`/medical-history/patient/${id}`)
+          : Promise.resolve(null),
+      ]);
+      setPrintVisits(visitsResponse.data);
+      setPrintHistory(historyResponse?.data ?? null);
+      setPrintRequested(true);
+    } catch (requestError: unknown) {
+      setPrintError(requestError instanceof Error
+        ? requestError.message
+        : "The complete printable record could not be loaded");
+    } finally {
+      setPrintLoading(false);
+    }
+  };
 
   useEffect(() => {
-    if (!canViewMedicalHistory) return;
-    api
-      .get<MedicalHistory[]>(`/medical-history/patient/${id}`)
-      .then((r) => setPrintHistory(r.data))
-      .catch(() => {});
-  }, [id, canViewMedicalHistory]);
+    if (!printRequested || printVisits === null) return;
+    const frame = window.requestAnimationFrame(() => {
+      window.print();
+      setPrintRequested(false);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [printRequested, printVisits, printHistory]);
 
-  if (loading) return <Layout><p className="text-gray-400 text-sm">Loading…</p></Layout>;
-  if (error || !patient) return <Layout><p className="text-red-500 text-sm">{error || "Student not found"}</p></Layout>;
+  if (loading) {
+    const loadingContent = <p className="py-12 text-center text-sm text-gray-400">Loading…</p>;
+    return embedded ? loadingContent : <Layout>{loadingContent}</Layout>;
+  }
+  if (error || !patient) {
+    const errorContent = <p className="py-12 text-center text-sm text-red-500">{error || "Patient not found"}</p>;
+    return embedded ? errorContent : <Layout>{errorContent}</Layout>;
+  }
 
-  return (
-    <Layout>
+  const content = (
+    <>
       <div className="print:hidden">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-          <button onClick={() => navigate(safeReturnTo)} className="text-sm text-blue-600 hover:underline inline-block">
-            ← Back to Student Records
-          </button>
-          <div className="flex flex-wrap gap-2">
+          {!embedded && (
+            <button onClick={() => navigate(safeReturnTo)} className="inline-block text-sm text-blue-600 hover:underline">
+              ← Back to Patient Records
+            </button>
+          )}
+          <div className="ml-auto flex flex-wrap gap-2">
             {canCheckIn && (
               <button
-                onClick={() => navigate(`/patient-queue?patientId=${encodeURIComponent(patient._id)}`)}
+                onClick={() => navigate(
+                  embedded
+                    ? `/dashboard?view=visits&patientId=${encodeURIComponent(patient._id)}`
+                    : `/patient-queue?patientId=${encodeURIComponent(patient._id)}`,
+                )}
                 className="rounded bg-blue-600 px-4 py-2 text-sm text-white hover:bg-blue-700"
               >
-                Check In Student
+              Check In Patient
               </button>
             )}
             <button
-              onClick={() => window.print()}
+              onClick={handlePrint}
+              disabled={printLoading}
               className="rounded border bg-gray-100 px-4 py-2 text-sm text-gray-700 hover:bg-gray-200"
             >
-              Print Summary
+              {printLoading ? "Preparing Summary..." : "Print Summary"}
             </button>
           </div>
         </div>
+        {printError && (
+          <p role="alert" className="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+            Printing is disabled because the complete record could not be loaded: {printError}
+          </p>
+        )}
 
         <div className="mb-6 rounded bg-white p-4 shadow sm:p-6">
           <h2 className="text-lg font-semibold text-gray-800 mb-4">
             {patient.firstName} {patient.lastName}
+            <span className="ml-2 rounded-full bg-blue-50 px-2 py-1 align-middle text-xs font-semibold text-blue-700">{patientTypeLabel(patient)}</span>
           </h2>
           <div className="grid grid-cols-1 gap-4 text-sm sm:grid-cols-2 md:grid-cols-3">
-            <Field label="Student ID" value={patient.studentId} />
+            <Field label={patientTypeOf(patient) === "student" ? "Student ID" : "Employee ID"} value={patientIdentifier(patient)} />
             <Field label="Age" value={String(patient.age)} />
             <Field label="Date of Birth" value={patient.dateOfBirth ? new Date(patient.dateOfBirth).toLocaleDateString() : "Not recorded"} />
             <Field label="Gender" value={patient.gender} />
             <Field label="Blood Type" value={patient.bloodType || "Not recorded"} />
-            <Field label="Course" value={patient.course} />
-            <Field label="Year Level" value={String(patient.yearLevel)} />
+            {patientTypeOf(patient) === "student" ? <>
+              <Field label="Education Level" value={educationLevelLabel(educationLevelOf(patient))} />
+              {educationLevelOf(patient) === "college" && <Field label="Course" value={patient.course || "Not recorded"} />}
+              <Field label={educationLevelOf(patient) === "college" ? "Year Level" : "Grade Level"} value={academicLevelLabel(patient)} />
+              {educationLevelOf(patient) === "college" && <Field label="Program Length" value={`${patient.programDurationYears ?? 4} years`} />}
+            </> : <>
+              <Field label="Department" value={patient.department || "Not recorded"} />
+              <Field label="Position" value={patient.position || "Not recorded"} />
+            </>}
             <Field label="Contact" value={patient.contactNumber} />
-            <Field label="Guardian Emergency Contact" value={patient.guardianName ? `${patient.guardianName}${patient.guardianContactNumber ? ` (${patient.guardianContactNumber})` : ""}` : "Not recorded"} />
+            <Field label="Emergency Contact" value={patientTypeOf(patient) === "student" ? (patient.guardianName ? `${patient.guardianName}${patient.guardianContactNumber ? ` (${patient.guardianContactNumber})` : ""}` : "Not recorded") : (patient.emergencyContactName ? `${patient.emergencyContactName}${patient.emergencyContactNumber ? ` (${patient.emergencyContactNumber})` : ""}` : "Not recorded")} />
             <Field label="Health Conditions" value={patient.healthConditions || "None recorded"} />
             <Field label="Address" value={patient.address} className="sm:col-span-2 md:col-span-3" />
           </div>
         </div>
+
+        {canViewMedicalHistory && (
+          <div className="mb-6">
+            <ClinicalProfileEditor
+              patient={patient}
+              mode={role === "doctor" ? "doctor" : "nurse"}
+              onSaved={setPatient}
+            />
+          </div>
+        )}
 
         {((patient.medicalAlerts?.allergies?.length ?? 0) > 0 ||
           (patient.medicalAlerts?.chronicConditions?.length ?? 0) > 0 ||
@@ -112,30 +181,23 @@ function PatientDetailPage() {
           </section>
         )}
 
-        {patient.consents && (
-          <section className="mb-6 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
-            <h3 className="font-semibold text-gray-900">Consent Status</h3>
-            <div className="mt-3 flex flex-wrap gap-2 text-xs">
-              <ConsentBadge label="Treatment" granted={patient.consents.treatment} />
-              <ConsentBadge label="Medicine" granted={patient.consents.medicineAdministration} />
-              <ConsentBadge label="Data Privacy" granted={patient.consents.dataPrivacy} />
-            </div>
-          </section>
-        )}
-
-        <PatientVisits patientId={id!} />
+        <PatientVisits patientId={id!} patientAge={patient.age} patientGender={patient.gender} patientDateOfBirth={patient.dateOfBirth} />
         <PatientMedicalHistory patientId={id!} />
       </div>
 
-      <div className="hidden print:block">
-        <PrintablePatientSummary
-          patient={patient}
-          visits={printVisits}
-          history={canViewMedicalHistory ? printHistory ?? [] : null}
-        />
-      </div>
-    </Layout>
+      {printVisits !== null && !printError && (
+        <div className="hidden print:block">
+          <PrintablePatientSummary
+            patient={patient}
+            visits={printVisits}
+            history={canViewMedicalHistory ? printHistory : null}
+          />
+        </div>
+      )}
+    </>
   );
+
+  return embedded ? content : <Layout>{content}</Layout>;
 }
 
 function Field({ label, value, className = "" }: { label: string; value: string; className?: string }) {
@@ -144,16 +206,6 @@ function Field({ label, value, className = "" }: { label: string; value: string;
       <p className="text-xs text-gray-400">{label}</p>
       <p className="break-words font-medium text-gray-800">{value}</p>
     </div>
-  );
-}
-
-function ConsentBadge({ label, granted }: { label: string; granted: boolean }) {
-  return (
-    <span className={`rounded-full px-3 py-1 font-medium ${
-      granted ? "bg-emerald-100 text-emerald-700" : "bg-red-100 text-red-700"
-    }`}>
-      {label}: {granted ? "Granted" : "Not granted"}
-    </span>
   );
 }
 

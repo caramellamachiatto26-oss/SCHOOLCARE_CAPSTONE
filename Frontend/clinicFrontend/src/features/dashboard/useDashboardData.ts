@@ -9,6 +9,8 @@ type LegacyDashboardStats = Partial<DashboardStats> & { totalPatients?: number }
 export function normalizeDashboardStats(data: LegacyDashboardStats): DashboardStats {
   return {
     totalStudents: data.totalStudents ?? data.totalPatients ?? 0,
+    totalPatients: data.totalPatients ?? data.totalStudents ?? 0,
+    patientsByType: data.patientsByType ?? { student: data.totalStudents ?? data.totalPatients ?? 0, teacher: 0, staff: 0 },
     usersByRole: {
       doctor: 0,
       nurse: 0,
@@ -30,10 +32,23 @@ export function normalizeDashboardStats(data: LegacyDashboardStats): DashboardSt
     activeUsers: data.activeUsers ?? [],
     commonComplaints: data.commonComplaints ?? [],
     monthlyVisits: data.monthlyVisits ?? [],
+    analyticsPatientType: data.analyticsPatientType ?? "all",
+    analyticsTotalVisits: data.analyticsTotalVisits ?? 0,
+    analyticsVisitBreakdown: data.analyticsVisitBreakdown ?? { student: 0, teacher: 0, staff: 0 },
+    bmiRecordedCount: data.bmiRecordedCount ?? 0,
+    bmiBreakdown: {
+      underweight: 0,
+      normalWeight: 0,
+      overweight: 0,
+      obese: 0,
+      ...data.bmiBreakdown,
+    },
     recentCases: data.recentCases ?? [],
     recentActivity: data.recentActivity ?? [],
   };
 }
+
+export type AnalyticsPatientType = DashboardStats["analyticsPatientType"];
 
 export function useDashboardData(role: UserRole | null, userId?: string) {
   const [stats, setStats] = useState<DashboardStats | null>(null);
@@ -41,6 +56,11 @@ export function useDashboardData(role: UserRole | null, userId?: string) {
   const [error, setError] = useState("");
 
   useEffect(() => {
+    if (!role || role === "superadmin") {
+      setStats(null);
+      setError("");
+      return;
+    }
     let cancelled = false;
 
     api
@@ -57,7 +77,7 @@ export function useDashboardData(role: UserRole | null, userId?: string) {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [role]);
 
   useEffect(() => {
     if (role !== "doctor" && role !== "nurse") {

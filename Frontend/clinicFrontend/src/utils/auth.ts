@@ -6,34 +6,61 @@ export type { UserRole };
 export interface CurrentUser {
   id: string;
   role: UserRole;
+  mustChangePassword: boolean;
+  termsAccepted: true;
   exp?: number;
 }
 
 const SESSION_KEY = "clinic_session";
+const SESSION_EVENT = "clinic-session-changed";
+const SESSION_CHANNEL = "clinic-session";
+
+const notifySessionChanged = (status: "authenticated" | "cleared"): void => {
+  window.dispatchEvent(new CustomEvent(SESSION_EVENT, { detail: status }));
+  if ("BroadcastChannel" in window) {
+    const channel = new BroadcastChannel(SESSION_CHANNEL);
+    channel.postMessage(status);
+    channel.close();
+  }
+};
+
+export const subscribeToSessionChanges = (listener: () => void): (() => void) => {
+  const onLocalChange = () => listener();
+  window.addEventListener(SESSION_EVENT, onLocalChange);
+  const channel = "BroadcastChannel" in window ? new BroadcastChannel(SESSION_CHANNEL) : null;
+  if (channel) channel.onmessage = listener;
+  return () => {
+    window.removeEventListener(SESSION_EVENT, onLocalChange);
+    channel?.close();
+  };
+};
 
 const isUserRole = (value: unknown): value is UserRole =>
   typeof value === "string" && (USER_ROLES as readonly string[]).includes(value);
 
 export const saveCurrentSession = (
-  user: { id: string; role: UserRole },
+  user: { id: string; role: UserRole; mustChangePassword?: boolean },
   expiresAt: string
 ): void => {
   const expiry = new Date(expiresAt).getTime();
   if (!Number.isFinite(expiry)) return;
   sessionStorage.setItem(
     SESSION_KEY,
-    JSON.stringify({ id: user.id, role: user.role, exp: Math.floor(expiry / 1000) })
+    JSON.stringify({ id: user.id, role: user.role, mustChangePassword: user.mustChangePassword === true, termsAccepted: true, exp: Math.floor(expiry / 1000) })
   );
+  notifySessionChanged("authenticated");
 };
 
 export const clearCurrentSession = (): void => {
   sessionStorage.removeItem(SESSION_KEY);
   // Remove legacy JWTs left by older deployments.
   localStorage.removeItem("token");
+  notifySessionChanged("cleared");
 };
 
 export type SessionRestoreResult =
   | { status: "authenticated"; user: CurrentUser }
+  | { status: "terms_required"; user: { id: string; role: UserRole; mustChangePassword: boolean }; expiresAt: string }
   | { status: "unauthenticated" }
   | { status: "unavailable"; message: string };
 
@@ -57,7 +84,8 @@ export const restoreCurrentSession = async (): Promise<SessionRestoreResult> => 
 
     const payload = (await response.json()) as {
       data?: {
-        user?: { id?: unknown; role?: unknown };
+        user?: { id?: unknown; role?: unknown; mustChangePassword?: unknown };
+        termsAccepted?: unknown;
         expiresAt?: unknown;
       };
     };
@@ -65,12 +93,15 @@ export const restoreCurrentSession = async (): Promise<SessionRestoreResult> => 
     const id = payload.data?.user?.id;
     const role = payload.data?.user?.role;
     const expiresAt = payload.data?.expiresAt;
+    const termsAccepted = payload.data?.termsAccepted;
+    const mustChangePassword = payload.data?.user?.mustChangePassword === true;
 
     if (
       typeof id !== "string" ||
       !isUserRole(role) ||
       typeof expiresAt !== "string" ||
-      Number.isNaN(new Date(expiresAt).getTime())
+      Number.isNaN(new Date(expiresAt).getTime()) ||
+      typeof termsAccepted !== "boolean"
     ) {
       return {
         status: "unavailable",
@@ -78,7 +109,12 @@ export const restoreCurrentSession = async (): Promise<SessionRestoreResult> => 
       };
     }
 
-    saveCurrentSession({ id, role }, expiresAt);
+    if (!termsAccepted) {
+      clearCurrentSession();
+      return { status: "terms_required", user: { id, role, mustChangePassword }, expiresAt };
+    }
+
+    saveCurrentSession({ id, role, mustChangePassword }, expiresAt);
 
     const user = getCurrentUser();
 
@@ -108,13 +144,20 @@ export const getCurrentUser = (): CurrentUser | null => {
       return null;
     }
 
-    if (typeof payload.id !== "string" || !isUserRole(payload.role)) {
+    if (
+      typeof payload.id !== "string" ||
+      !isUserRole(payload.role) ||
+      payload.termsAccepted !== true
+    ) {
+      clearCurrentSession();
       return null;
     }
 
     return {
       id: payload.id,
       role: payload.role,
+      mustChangePassword: payload.mustChangePassword === true,
+      termsAccepted: true,
       exp: payload.exp as number | undefined,
     };
   } catch {

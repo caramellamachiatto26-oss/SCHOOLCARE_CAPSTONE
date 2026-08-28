@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
-import Layout from "../layout/Layout";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import PageFrame from "../components/PageFrame";
 import { api } from "../services/api";
 import { useAuth } from "../hooks/useAuth";
 import { useToast } from "../hooks/useToast";
@@ -8,12 +8,14 @@ import DoctorWorkspaceTabs from "../components/DoctorWorkspaceTabs";
 import type {
   Appointment,
   ClinicVisit,
+  LatestPatientVitals,
   MedicalHistory,
   Medicine,
   Patient,
 } from "../utils/types";
 import { localDateKey } from "../utils/date";
 import { reportFilename, saveBlobDownload } from "../utils/download";
+import { notifyClinicAnalyticsUpdated } from "../utils/clinicEvents";
 import {
   activeFollowUps,
   buildMedicalHistoryPayload,
@@ -24,7 +26,12 @@ import {
   todaysAppointments,
   type ConsultationForm,
 } from "../features/clinical/clinicalWorkspaceModel";
-import type { ReactNode } from "react";
+import ClinicalProfileEditor from "../features/patients/ClinicalProfileEditor";
+import { EmptyState, Panel, StatusBadge } from "../components/ui";
+import { patientAffiliation, patientIdentifier, patientTypeLabel } from "../utils/patient";
+import { BmiPreview } from "../components/BmiPreview";
+import SearchablePatientSelect from "../components/SearchablePatientSelect";
+import PatientRecordModal from "../components/PatientRecordModal";
 
 type Tab = "appointments" | "records" | "consultation" | "followups";
 
@@ -35,13 +42,22 @@ const TABS: { id: Tab; label: string }[] = [
   { id: "followups", label: "Follow-Ups" },
 ];
 
-function PageFrame({ embedded, children }: { embedded: boolean; children: ReactNode }) {
-  return embedded ? <>{children}</> : <Layout>{children}</Layout>;
-}
+const CONSULTATION_DRAFT_PREFIX = "clinic-consultation-draft";
+
+const loadLatestPatientVitals = async (patientId: string): Promise<LatestPatientVitals | null> => {
+  try {
+    return (await api.get<LatestPatientVitals | null>(
+      `/visits/patient/${patientId}/latest-vitals`,
+    )).data;
+  } catch {
+    return null;
+  }
+};
 
 function ClinicalWorkspacePage({ embedded = false }: { embedded?: boolean }) {
   const { role, user } = useAuth();
   const { showToast } = useToast();
+  const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const isDoctor = role === "doctor";
   const requestedTab = searchParams.get("tab") as Tab | null;
@@ -54,31 +70,85 @@ function ClinicalWorkspacePage({ embedded = false }: { embedded?: boolean }) {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [recordSearch, setRecordSearch] = useState("");
+  const [viewingPatientId, setViewingPatientId] = useState<string | null>(null);
   const [form, setForm] = useState<ConsultationForm>(() => createEmptyConsultation({
     visitId: searchParams.get("visitId") ?? "",
     patientId: searchParams.get("patientId") ?? "",
     appointmentId: searchParams.get("appointmentId") ?? "",
-    complaint: searchParams.get("complaint") ?? "",
   }));
   const [saving, setSaving] = useState(false);
   const [generatingCertificate, setGeneratingCertificate] = useState(false);
   const [formError, setFormError] = useState("");
+  const [prefilledHeightRecordedAt, setPrefilledHeightRecordedAt] = useState<string | null>(null);
+  const [prefilledWeightRecordedAt, setPrefilledWeightRecordedAt] = useState<string | null>(null);
+  const [draftStatus, setDraftStatus] = useState("");
+  const draftHydrated = useRef(false);
+  const draftKey = `${CONSULTATION_DRAFT_PREFIX}:${user?.id ?? "anonymous"}`;
+
+  useEffect(() => {
+    if (!user?.id || draftHydrated.current) return;
+    const hasLinkedRecord = Boolean(
+      searchParams.get("visitId") ||
+      searchParams.get("patientId") ||
+      searchParams.get("appointmentId"),
+    );
+    draftHydrated.current = true;
+    if (hasLinkedRecord) return;
+
+    try {
+      const stored = sessionStorage.getItem(draftKey);
+      if (!stored) return;
+      const draft = JSON.parse(stored) as { form?: ConsultationForm };
+      if (draft.form?.patientId) {
+        setForm(draft.form);
+        setDraftStatus("Draft restored");
+      }
+    } catch {
+      sessionStorage.removeItem(draftKey);
+    }
+  }, [draftKey, searchParams, user?.id]);
+
+  useEffect(() => {
+    if (!user?.id || !draftHydrated.current) return;
+    const hasContent = Boolean(form.patientId || form.complaint || form.diagnosis || form.assessment || form.treatment);
+    if (!hasContent) {
+      sessionStorage.removeItem(draftKey);
+      setDraftStatus("");
+      return;
+    }
+
+    setDraftStatus("Saving draft…");
+    const timeout = window.setTimeout(() => {
+      sessionStorage.setItem(draftKey, JSON.stringify({ form, savedAt: new Date().toISOString() }));
+      setDraftStatus("Draft saved");
+    }, 500);
+    return () => window.clearTimeout(timeout);
+  }, [draftKey, form, user?.id]);
+
+  useEffect(() => {
+    const warnAboutDraft = (event: BeforeUnloadEvent) => {
+      if (!draftStatus || saving) return;
+      event.preventDefault();
+    };
+    window.addEventListener("beforeunload", warnAboutDraft);
+    return () => window.removeEventListener("beforeunload", warnAboutDraft);
+  }, [draftStatus, saving]);
 
   const fetchWorkspace = async () => {
     setLoadError("");
     try {
-      const appointmentParams = new URLSearchParams({ limit: "200" });
+      const appointmentParams = new URLSearchParams();
       if (isDoctor && user?.id) appointmentParams.set("doctorId", user.id);
 
       const [patientResponse, appointmentResponse, medicineResponse] = await Promise.all([
-        api.get<Patient[]>("/patients?limit=200"),
-        api.get<Appointment[]>(`/appointments?${appointmentParams}`),
-        isDoctor ? api.get<Medicine[]>("/medicines?limit=200") : Promise.resolve(null),
+        api.getAll<Patient>("/patients"),
+        api.getAll<Appointment>(`/appointments?${appointmentParams}`),
+        api.getAll<Medicine>("/medicines/prescription-search"),
       ]);
 
       setPatients(patientResponse.data);
       setAppointments(appointmentResponse.data);
-      setMedicines(medicineResponse?.data ?? []);
+      setMedicines(medicineResponse.data);
     } catch (error: unknown) {
       setLoadError(error instanceof Error ? error.message : "Failed to load clinical workspace");
     } finally {
@@ -100,10 +170,13 @@ function ClinicalWorkspacePage({ embedded = false }: { embedded?: boolean }) {
     if (!visitId) return;
 
     api.get<ClinicVisit>(`/visits/${visitId}`)
-      .then((response) => {
+      .then(async (response) => {
         const visit = response.data;
         const patientId =
           typeof visit.patientId === "object" ? visit.patientId._id : visit.patientId;
+        const latestVitals = !isDoctor && (visit.heightCm == null || visit.weightKg == null)
+          ? await loadLatestPatientVitals(patientId)
+          : null;
         const appointmentId = visit.appointmentId
           ? typeof visit.appointmentId === "object"
             ? visit.appointmentId._id
@@ -120,17 +193,27 @@ function ClinicalWorkspacePage({ embedded = false }: { embedded?: boolean }) {
           bloodPressure: visit.bloodPressure ?? "",
           pulseRate: visit.pulseRate != null ? String(visit.pulseRate) : "",
           respiratoryRate: visit.respiratoryRate != null ? String(visit.respiratoryRate) : "",
-          heightCm: visit.heightCm != null ? String(visit.heightCm) : "",
-          weightKg: visit.weightKg != null ? String(visit.weightKg) : "",
+          heightCm: visit.heightCm != null
+            ? String(visit.heightCm)
+            : latestVitals?.heightCm != null ? String(latestVitals.heightCm) : "",
+          weightKg: visit.weightKg != null
+            ? String(visit.weightKg)
+            : latestVitals?.weightKg != null ? String(latestVitals.weightKg) : "",
           assessment: visit.nursingAssessment ?? "",
           treatment: visit.nursingInterventions ?? visit.treatment ?? "",
           recommendations: visit.nursingRecommendations ?? "",
         }));
+        setPrefilledHeightRecordedAt(
+          visit.heightCm == null ? latestVitals?.heightRecordedAt ?? null : null,
+        );
+        setPrefilledWeightRecordedAt(
+          visit.weightKg == null ? latestVitals?.weightRecordedAt ?? null : null,
+        );
       })
       .catch((error: unknown) => {
         setLoadError(error instanceof Error ? error.message : "Failed to load the clinic visit");
       });
-  }, [searchParams]);
+  }, [isDoctor, searchParams]);
 
   const startConsultation = async (appointment?: Appointment, patient?: Patient) => {
     const appointmentPatient = appointment ? patientDetails(appointment.patientId) : null;
@@ -147,7 +230,7 @@ function ClinicalWorkspacePage({ embedded = false }: { embedded?: boolean }) {
 
     if (appointment && !visitId) {
       if (isDoctor) {
-        showToast("Waiting for nurse check-in and triage before consultation");
+        showToast("Waiting for nurse check-in and triage before consultation", "warning");
         return;
       }
       try {
@@ -158,7 +241,7 @@ function ClinicalWorkspacePage({ embedded = false }: { embedded?: boolean }) {
         visitId = response.data.visit._id;
         currentVisit = response.data.visit;
       } catch (error: unknown) {
-        showToast(error instanceof Error ? error.message : "Check-in failed");
+        showToast(error instanceof Error ? error.message : "Check-in failed", "error");
         return;
       }
     }
@@ -167,19 +250,33 @@ function ClinicalWorkspacePage({ embedded = false }: { embedded?: boolean }) {
       try {
         currentVisit = (await api.get<ClinicVisit>(`/visits/${visitId}`)).data;
         if (isDoctor && !currentVisit.readyForDoctor) {
-          showToast("A nurse must record triage and mark the student ready first");
+          showToast("A nurse must record triage and mark the student ready first", "warning");
           return;
         }
-        await api.put(`/visits/${visitId}/status`, { status: "in_consultation" });
+        if (isDoctor) {
+          await api.put(`/visits/${visitId}/status`, { status: "in_consultation" });
+        }
       } catch (error: unknown) {
-        showToast(error instanceof Error ? error.message : "Failed to start consultation");
+        showToast(error instanceof Error ? error.message : "Failed to start consultation", "error");
         return;
       }
     }
 
+    const currentVisitPatientId = currentVisit?.patientId
+      ? typeof currentVisit.patientId === "object"
+        ? currentVisit.patientId._id
+        : currentVisit.patientId
+      : "";
+    const currentPatientId = selectedPatient?._id ?? currentVisitPatientId;
+    const latestVitals = !isDoctor &&
+      (currentVisit?.heightCm == null || currentVisit?.weightKg == null) &&
+      currentPatientId
+      ? await loadLatestPatientVitals(currentPatientId)
+      : null;
+
     setForm(createEmptyConsultation({
       visitId,
-      patientId: selectedPatient?._id ?? "",
+      patientId: currentPatientId,
       appointmentId: appointment?._id ?? "",
       complaint: currentVisit?.complaint ?? appointment?.reason ?? "",
       temperature: currentVisit?.temperature != null ? String(currentVisit.temperature) : "",
@@ -187,17 +284,35 @@ function ClinicalWorkspacePage({ embedded = false }: { embedded?: boolean }) {
       pulseRate: currentVisit?.pulseRate != null ? String(currentVisit.pulseRate) : "",
       respiratoryRate:
         currentVisit?.respiratoryRate != null ? String(currentVisit.respiratoryRate) : "",
-      heightCm: currentVisit?.heightCm != null ? String(currentVisit.heightCm) : "",
-      weightKg: currentVisit?.weightKg != null ? String(currentVisit.weightKg) : "",
+      heightCm: currentVisit?.heightCm != null
+        ? String(currentVisit.heightCm)
+        : latestVitals?.heightCm != null ? String(latestVitals.heightCm) : "",
+      weightKg: currentVisit?.weightKg != null
+        ? String(currentVisit.weightKg)
+        : latestVitals?.weightKg != null ? String(latestVitals.weightKg) : "",
       assessment: currentVisit?.nursingAssessment ?? "",
       recommendations: currentVisit?.nursingRecommendations ?? "",
     }));
+    setPrefilledHeightRecordedAt(
+      currentVisit?.heightCm == null ? latestVitals?.heightRecordedAt ?? null : null,
+    );
+    setPrefilledWeightRecordedAt(
+      currentVisit?.weightKg == null ? latestVitals?.weightRecordedAt ?? null : null,
+    );
     setFormError("");
     changeTab("consultation");
   };
 
   const updateForm = (field: keyof typeof form, value: string) => {
+    if (field === "heightCm") setPrefilledHeightRecordedAt(null);
+    if (field === "weightKg") setPrefilledWeightRecordedAt(null);
     setForm((current) => ({ ...current, [field]: value }));
+  };
+
+  const handleProfileSaved = (updatedPatient: Patient) => {
+    setPatients((current) => current.map((patient) =>
+      patient._id === updatedPatient._id ? updatedPatient : patient
+    ));
   };
 
   const handleConsultation = async (event: React.FormEvent) => {
@@ -220,12 +335,22 @@ function ClinicalWorkspacePage({ embedded = false }: { embedded?: boolean }) {
       setForm((current) => ({ ...current, visitId }));
 
       let savedHistory: MedicalHistory | null = null;
-      if (isDoctor) {
+      let nurseMedicationClaimed = false;
+      const nurseMedicationOrder = !isDoctor && Boolean(form.medicineId);
+      if (isDoctor || nurseMedicationOrder) {
         const historyResponse = await api.post<MedicalHistory>(
           "/medical-history",
-          buildMedicalHistoryPayload(form, visitId),
+          buildMedicalHistoryPayload(form, visitId, nurseMedicationOrder),
         );
         savedHistory = historyResponse.data;
+        if (nurseMedicationOrder) {
+          try {
+            await api.post(`/medical-history/${savedHistory._id}/claim`, {});
+            nurseMedicationClaimed = true;
+          } catch {
+            relatedWarnings.push("the medication order still needs to be accepted");
+          }
+        }
       } else {
         await api.put(`/visits/${visitId}/status`, {
           status: "completed",
@@ -281,18 +406,41 @@ function ClinicalWorkspacePage({ embedded = false }: { embedded?: boolean }) {
         }
       }
 
+      const recordLabel = isDoctor
+        ? "Consultation"
+        : form.medicineId
+          ? "Nursing assessment and medication order"
+          : "Nursing assessment";
+      notifyClinicAnalyticsUpdated();
       showToast(
         relatedWarnings.length > 0
-          ? `Consultation saved, but ${relatedWarnings.join(" and ")}.`
+          ? `${recordLabel} saved, but ${relatedWarnings.join(" and ")}.`
           : shouldGenerateCertificate
             ? "Consultation saved and certificate generated"
-            : "Consultation saved successfully",
+            : `${recordLabel} saved successfully`,
       );
+      sessionStorage.removeItem(draftKey);
+      setDraftStatus("");
+      setPrefilledHeightRecordedAt(null);
+      setPrefilledWeightRecordedAt(null);
       setForm(createEmptyConsultation());
       await fetchWorkspace();
-      changeTab(form.followUpDate ? "followups" : "appointments");
+      if (nurseMedicationOrder && savedHistory) {
+        const medicationParams = new URLSearchParams({
+          view: "medications",
+          order: savedHistory._id,
+        });
+        if (nurseMedicationClaimed) medicationParams.set("review", "1");
+        navigate(`/dashboard?${medicationParams}`);
+      } else {
+        changeTab(form.followUpDate ? "followups" : "appointments");
+      }
     } catch (error: unknown) {
-      setFormError(error instanceof Error ? error.message : "Failed to save consultation");
+      setFormError(
+        error instanceof Error
+          ? error.message
+          : `Failed to save ${isDoctor ? "consultation" : "nursing assessment"}`,
+      );
     } finally {
       setSaving(false);
       setGeneratingCertificate(false);
@@ -339,18 +487,27 @@ function ClinicalWorkspacePage({ embedded = false }: { embedded?: boolean }) {
                 patients={filteredPatients}
                 search={recordSearch}
                 onSearch={setRecordSearch}
-                onStart={isDoctor ? undefined : (patient) => startConsultation(undefined, patient)}
+                onView={(patient) => setViewingPatientId(patient._id)}
               />
             )}
             {activeTab === "consultation" && (
-              isDoctor && !form.visitId ? (
+              !form.visitId ? (
                 <Panel
-                  title="Select a Triaged Student"
-                  subtitle="Physician consultations begin after the nurse records vitals and marks the student ready"
+                  title={isDoctor ? "Select a Triaged Patient" : "Check In a Patient First"}
+                  subtitle={isDoctor
+                    ? "Physician consultations begin after the nurse records vitals and marks the patient ready"
+                    : "Nursing assessments must be linked to an active clinic visit"}
                 >
                   <div className="rounded-lg bg-sky-50 p-5 text-sm text-sky-900">
-                    Open <Link to="/patient-queue" className="font-semibold underline">Student Queue</Link> or
-                    select a ready student from Today&apos;s Appointments to begin the consultation.
+                    Open <Link
+                      to={embedded
+                        ? isDoctor ? "/dashboard?tab=visits" : "/dashboard?view=visits"
+                        : "/patient-queue"}
+                      className="font-semibold underline"
+                    >Patient Visits</Link>
+                    {isDoctor
+                      ? " and select a patient marked ready for the doctor."
+                      : " to check in the patient before recording an assessment."}
                   </div>
                 </Panel>
               ) : (
@@ -362,8 +519,13 @@ function ClinicalWorkspacePage({ embedded = false }: { embedded?: boolean }) {
                   saving={saving}
                   generatingCertificate={generatingCertificate}
                   error={formError}
+                  draftStatus={draftStatus}
+                  prefilledHeightRecordedAt={prefilledHeightRecordedAt}
+                  prefilledWeightRecordedAt={prefilledWeightRecordedAt}
                   onChange={updateForm}
                   onSubmit={handleConsultation}
+                  onProfileSaved={handleProfileSaved}
+                  onViewPatient={() => form.patientId && setViewingPatientId(form.patientId)}
                 />
               )
             )}
@@ -375,6 +537,11 @@ function ClinicalWorkspacePage({ embedded = false }: { embedded?: boolean }) {
             )}
           </>
         )}
+
+        <PatientRecordModal
+          patientId={viewingPatientId}
+          onClose={() => setViewingPatientId(null)}
+        />
       </div>
     </PageFrame>
   );
@@ -394,13 +561,48 @@ function AppointmentsTab({
       {appointments.length === 0 ? (
         <EmptyState text="No appointments scheduled for today." />
       ) : (
-        <div className="overflow-x-auto">
+        <>
+          <div className="space-y-3 md:hidden">
+            {appointments.map((appointment) => {
+              const student = patientDetails(appointment.patientId);
+              const linkedVisit = appointment.visitId && typeof appointment.visitId === "object" ? appointment.visitId : null;
+              const awaitingNurse = isDoctor && (!appointment.visitId || (linkedVisit && !linkedVisit.readyForDoctor));
+              return (
+                <article key={appointment._id} className="rounded-xl border border-gray-200 p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="font-semibold text-gray-950">{student ? `${student.firstName} ${student.lastName}` : "Unknown patient"}</p>
+                      <p className="mt-1 font-mono text-xs text-gray-500">{student ? `${patientIdentifier(student)} · ${patientTypeLabel(student)}` : "—"}</p>
+                    </div>
+                    <StatusBadge status={appointment.status} />
+                  </div>
+                  <dl className="mt-4 grid grid-cols-[5rem_1fr] gap-x-3 gap-y-2 text-sm">
+                    <dt className="text-gray-500">Time</dt>
+                    <dd>{new Date(appointment.appointmentDate).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</dd>
+                    <dt className="text-gray-500">Reason</dt>
+                    <dd>{appointment.reason}</dd>
+                  </dl>
+                  {appointment.status !== "completed" && (
+                    awaitingNurse ? (
+                      <p className="mt-4 text-xs font-medium text-amber-700">{!appointment.visitId ? "Awaiting nurse check-in" : "Awaiting nurse triage"}</p>
+                    ) : (
+                      <button onClick={() => onStart(appointment)} className="mt-4 min-h-11 w-full rounded-lg border px-3 text-sm font-medium hover:bg-gray-50">
+                        {isDoctor ? "Start Consultation" : "Start Assessment"}
+                      </button>
+                    )
+                  )}
+                </article>
+              );
+            })}
+          </div>
+          <div className="hidden overflow-x-auto md:block">
           <table className="w-full min-w-[760px] text-sm">
+            <caption className="sr-only">Today&apos;s clinic appointments</caption>
             <thead className="border-b text-left text-xs uppercase text-gray-500">
               <tr>
                 <th className="px-3 py-3">Time</th>
-                <th className="px-3 py-3">Student</th>
-                <th className="px-3 py-3">Student ID</th>
+                <th className="px-3 py-3">Patient</th>
+                <th className="px-3 py-3">Patient ID</th>
                 <th className="px-3 py-3">Reason</th>
                 <th className="px-3 py-3">Status</th>
                 <th className="px-3 py-3">Action</th>
@@ -421,8 +623,8 @@ function AppointmentsTab({
                     <td className="whitespace-nowrap px-3 py-4">
                       {new Date(appointment.appointmentDate).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                     </td>
-                    <td className="px-3 py-4">{student ? `${student.firstName} ${student.lastName}` : "Unknown student"}</td>
-                    <td className="px-3 py-4 font-mono text-xs">{student?.studentId ?? "—"}</td>
+                    <td className="px-3 py-4">{student ? `${student.firstName} ${student.lastName}` : "Unknown patient"}</td>
+                    <td className="px-3 py-4 font-mono text-xs">{student ? `${patientIdentifier(student)} · ${patientTypeLabel(student)}` : "—"}</td>
                     <td className="px-3 py-4">{appointment.reason}</td>
                     <td className="px-3 py-4"><StatusBadge status={appointment.status} /></td>
                     <td className="px-3 py-4">
@@ -434,7 +636,7 @@ function AppointmentsTab({
                         </span>
                       ) : appointment.status !== "completed" ? (
                         <button onClick={() => onStart(appointment)} className="rounded-lg border px-3 py-2 text-xs font-medium hover:bg-gray-50">
-                          Start Consultation
+                          {isDoctor ? "Start Consultation" : "Start Assessment"}
                         </button>
                       ) : null}
                     </td>
@@ -443,7 +645,8 @@ function AppointmentsTab({
               })}
             </tbody>
           </table>
-        </div>
+          </div>
+        </>
       )}
     </Panel>
   );
@@ -453,47 +656,40 @@ function StudentRecordsTab({
   patients,
   search,
   onSearch,
-  onStart,
+  onView,
 }: {
   patients: Patient[];
   search: string;
   onSearch: (value: string) => void;
-  onStart?: (patient: Patient) => void;
+  onView: (patient: Patient) => void;
 }) {
   return (
     <Panel
-      title="Search Student Records"
-      subtitle={onStart
-        ? "Open a student profile or begin a nursing assessment"
-        : "Review the student's clinic record"}
+      title="Search Patient Records"
+      subtitle="Review the patient’s clinic record"
     >
       <input
         type="search"
         value={search}
         onChange={(event) => onSearch(event.target.value)}
-        placeholder="Search by name or student ID..."
+        placeholder="Search by name, ID, type, department, or position..."
         className="input"
       />
       <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
         {patients.slice(0, 24).map((patient) => (
           <article key={patient._id} className="rounded-lg border p-4">
             <p className="font-semibold text-gray-900">{patient.firstName} {patient.lastName}</p>
-            <p className="mt-1 font-mono text-xs text-gray-500">{patient.studentId}</p>
-            <p className="mt-2 text-sm text-gray-600">{patient.course} · Year {patient.yearLevel}</p>
+            <p className="mt-1 font-mono text-xs text-gray-500">{patientIdentifier(patient)}</p>
+            <p className="mt-2 text-sm text-gray-600"><span className="font-semibold">{patientTypeLabel(patient)}</span> · {patientAffiliation(patient)}</p>
             <div className="mt-4 flex flex-wrap gap-2">
-              <Link to={`/patients/${patient._id}`} className="rounded-lg border px-3 py-2 text-xs font-medium hover:bg-gray-50">
+              <button type="button" onClick={() => onView(patient)} className="rounded-lg border px-3 py-2 text-xs font-medium hover:bg-gray-50">
                 View Record
-              </Link>
-              {onStart && (
-                <button onClick={() => onStart(patient)} className="rounded-lg bg-slate-900 px-3 py-2 text-xs font-medium text-white hover:bg-slate-800">
-                  New Nursing Assessment
-                </button>
-              )}
+              </button>
             </div>
           </article>
         ))}
       </div>
-      {patients.length === 0 && <EmptyState text="No students match your search." />}
+      {patients.length === 0 && <EmptyState text="No patients match your search." />}
     </Panel>
   );
 }
@@ -506,8 +702,13 @@ function ConsultationForm({
   saving,
   generatingCertificate,
   error,
+  draftStatus,
+  prefilledHeightRecordedAt,
+  prefilledWeightRecordedAt,
   onChange,
   onSubmit,
+  onProfileSaved,
+  onViewPatient,
 }: {
   form: ConsultationForm;
   patients: Patient[];
@@ -516,29 +717,68 @@ function ConsultationForm({
   saving: boolean;
   generatingCertificate: boolean;
   error: string;
+  draftStatus: string;
+  prefilledHeightRecordedAt: string | null;
+  prefilledWeightRecordedAt: string | null;
   onChange: (field: keyof typeof form, value: string) => void;
   onSubmit: (event: React.FormEvent) => void;
+  onProfileSaved: (patient: Patient) => void;
+  onViewPatient: () => void;
 }) {
+  const selectedPatient = patients.find((patient) => patient._id === form.patientId);
+  const persistentAllergies = selectedPatient?.medicalAlerts?.allergies ?? [];
+  const chronicConditions = selectedPatient?.medicalAlerts?.chronicConditions ?? [];
+  const currentMedications = selectedPatient?.medicalAlerts?.currentMedications ?? [];
   return (
     <Panel
-      title="Record New Consultation"
-      subtitle={isDoctor ? "Document diagnosis, treatment, and prescriptions" : "Document nursing assessment and interventions"}
+      title={isDoctor ? "Record New Consultation" : "Record New Nursing Assessment"}
+      subtitle={isDoctor ? "Document diagnosis, treatment, and prescriptions" : "Document nursing care and order medication when no doctor is available"}
     >
       {error && <div className="mb-4 rounded-lg bg-red-50 p-3 text-sm text-red-700">{error}</div>}
+      <div className="mb-4 flex min-h-6 justify-end" aria-live="polite">
+        {draftStatus && <span className="text-xs font-medium text-emerald-700">{draftStatus}</span>}
+      </div>
+      {selectedPatient && (
+        <div className="sticky top-0 z-10 mb-4 flex flex-col gap-3 rounded-xl border border-blue-200 bg-white/95 p-4 shadow-sm backdrop-blur sm:flex-row sm:items-center">
+          <div className="min-w-0 flex-1">
+            <p className="font-semibold text-gray-950">{selectedPatient.firstName} {selectedPatient.lastName}</p>
+            <p className="mt-0.5 text-xs text-gray-600">
+              {patientIdentifier(selectedPatient)} · {patientTypeLabel(selectedPatient)} · {patientAffiliation(selectedPatient)}
+            </p>
+          </div>
+          <button type="button" onClick={onViewPatient} className="inline-flex min-h-11 items-center justify-center rounded-lg border border-gray-300 px-3 text-sm font-medium text-gray-700 hover:bg-gray-50">
+            View full record
+          </button>
+        </div>
+      )}
       <form onSubmit={onSubmit} className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-        <Field label="Select Student" className="md:col-span-1 xl:col-span-2">
-          <select required value={form.patientId} onChange={(event) => onChange("patientId", event.target.value)} className="input">
-            <option value="">Choose student...</option>
-            {patients.map((patient) => (
-              <option key={patient._id} value={patient._id}>
-                {patient.firstName} {patient.lastName} ({patient.studentId})
-              </option>
-            ))}
-          </select>
+        <Field label="Select Patient" className="md:col-span-1 xl:col-span-2">
+          <SearchablePatientSelect
+            patients={patients}
+            value={form.patientId}
+            onChange={(patientId) => onChange("patientId", patientId)}
+          />
         </Field>
         <Field label="Visit Date">
           <input value={localDateKey()} disabled className="input bg-gray-50" />
         </Field>
+
+        {selectedPatient && (persistentAllergies.length > 0 || chronicConditions.length > 0 || currentMedications.length > 0) && (
+          <div className="rounded-lg border-2 border-red-200 bg-red-50 p-3 text-sm text-red-900 md:col-span-2 xl:col-span-3">
+            <p className="font-bold">Medical alerts</p>
+            {persistentAllergies.length > 0 && <p className="mt-1"><strong>Allergies:</strong> {persistentAllergies.join(", ")}</p>}
+            {chronicConditions.length > 0 && <p className="mt-1"><strong>Chronic conditions:</strong> {chronicConditions.join(", ")}</p>}
+            {currentMedications.length > 0 && <p className="mt-1"><strong>Current medications:</strong> {currentMedications.join(", ")}</p>}
+          </div>
+        )}
+
+        {selectedPatient && (
+          <ClinicalProfileEditor
+            patient={selectedPatient}
+            mode={isDoctor ? "doctor" : "nurse"}
+            onSaved={onProfileSaved}
+          />
+        )}
 
         <Field label="Chief Complaint" className="md:col-span-2 xl:col-span-3">
           <textarea required rows={3} value={form.complaint} onChange={(event) => onChange("complaint", event.target.value)} className="input" placeholder="Describe the main reason for the visit..." />
@@ -563,11 +803,22 @@ function ConsultationForm({
           <input type="number" min={1} value={form.respiratoryRate} onChange={(event) => onChange("respiratoryRate", event.target.value)} disabled={isDoctor} className={`input ${isDoctor ? "cursor-not-allowed bg-gray-100 text-gray-600" : ""}`} />
         </Field>
         <Field label="Height (cm)">
-          <input type="number" min={1} step="0.1" value={form.heightCm} onChange={(event) => onChange("heightCm", event.target.value)} disabled={isDoctor} className={`input ${isDoctor ? "cursor-not-allowed bg-gray-100 text-gray-600" : ""}`} />
+          <input type="number" min={30} max={250} step="0.1" value={form.heightCm} onChange={(event) => onChange("heightCm", event.target.value)} disabled={isDoctor} className={`input ${isDoctor ? "cursor-not-allowed bg-gray-100 text-gray-600" : ""}`} />
+          {prefilledHeightRecordedAt && !isDoctor && (
+            <p className="mt-1 text-xs text-blue-700">
+              Prefilled from {new Date(prefilledHeightRecordedAt).toLocaleDateString()}. Confirm or update it.
+            </p>
+          )}
         </Field>
         <Field label="Weight (kg)">
-          <input type="number" min={1} step="0.1" value={form.weightKg} onChange={(event) => onChange("weightKg", event.target.value)} disabled={isDoctor} className={`input ${isDoctor ? "cursor-not-allowed bg-gray-100 text-gray-600" : ""}`} />
+          <input type="number" min={1} max={500} step="0.1" value={form.weightKg} onChange={(event) => onChange("weightKg", event.target.value)} disabled={isDoctor} className={`input ${isDoctor ? "cursor-not-allowed bg-gray-100 text-gray-600" : ""}`} />
+          {prefilledWeightRecordedAt && !isDoctor && (
+            <p className="mt-1 text-xs text-blue-700">
+              Prefilled from {new Date(prefilledWeightRecordedAt).toLocaleDateString()}. Confirm or update it.
+            </p>
+          )}
         </Field>
+        <BmiPreview heightCm={form.heightCm} weightKg={form.weightKg} age={selectedPatient?.age} gender={selectedPatient?.gender} dateOfBirth={selectedPatient?.dateOfBirth} className="md:col-span-2 xl:col-span-3" />
 
         {isDoctor ? (
           <Field label="Diagnosis" className="md:col-span-2 xl:col-span-3">
@@ -589,9 +840,14 @@ function ConsultationForm({
           </Field>
         )}
 
-        {isDoctor && (
-          <>
-            <Field label="Prescription from Inventory" className="md:col-span-2">
+        {!isDoctor && (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 md:col-span-2 xl:col-span-3">
+            When no doctor is available, you may create a medication order here. The order is recorded under your nurse account and must still pass the medication safety check before it is given.
+          </div>
+        )}
+
+        <>
+            <Field label={isDoctor ? "Prescription from Inventory" : "Medicine to Prescribe / Give"} className="md:col-span-2">
               <select value={form.medicineId} onChange={(event) => onChange("medicineId", event.target.value)} className="input">
                 <option value="">No medicine selected</option>
                 {medicines.filter((medicine) => medicine.quantity > 0).map((medicine) => (
@@ -607,11 +863,7 @@ function ConsultationForm({
             <Field label="Medication Instructions" className="md:col-span-2">
               <input value={form.instructions} onChange={(event) => onChange("instructions", event.target.value)} className="input" placeholder="e.g. Take one tablet every 8 hours" />
             </Field>
-            <Field label="Laboratory Request">
-              <input value={form.labRequest} onChange={(event) => onChange("labRequest", event.target.value)} className="input" placeholder="Optional" />
-            </Field>
           </>
-        )}
 
         {!isDoctor && (
           <Field label="Student Outcome">
@@ -656,7 +908,9 @@ function ConsultationForm({
                 : "bg-slate-950 text-white hover:bg-slate-800"
             }`}
           >
-            {saving && !generatingCertificate ? "Saving Consultation..." : "Save Consultation"}
+            {saving && !generatingCertificate
+              ? `Saving ${isDoctor ? "Consultation" : "Assessment"}...`
+              : `Save ${isDoctor ? "Consultation" : "Assessment"}`}
           </button>
         </div>
       </form>
@@ -672,7 +926,7 @@ function FollowUpsTab({
   onStart: (appointment: Appointment) => void;
 }) {
   return (
-    <Panel title="Scheduled Follow-Up Visits" subtitle="Students requiring monitoring or follow-up care">
+    <Panel title="Scheduled Follow-Up Visits" subtitle="Patients requiring monitoring or follow-up care">
       {appointments.length === 0 ? (
         <EmptyState text="No follow-up visits scheduled." />
       ) : (
@@ -705,24 +959,6 @@ function FollowUpsTab({
   );
 }
 
-function Panel({
-  title,
-  subtitle,
-  children,
-}: {
-  title: string;
-  subtitle: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <section className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm sm:p-6">
-      <h3 className="font-semibold text-gray-900">{title}</h3>
-      <p className="mt-1 text-sm text-gray-500">{subtitle}</p>
-      <div className="mt-6">{children}</div>
-    </section>
-  );
-}
-
 function Field({
   label,
   className = "",
@@ -738,21 +974,6 @@ function Field({
       {children}
     </label>
   );
-}
-
-function StatusBadge({ status }: { status: Appointment["status"] }) {
-  const tones: Record<Appointment["status"], string> = {
-    pending: "bg-amber-50 text-amber-700",
-    confirmed: "bg-blue-50 text-blue-700",
-    checked_in: "bg-purple-50 text-purple-700",
-    cancelled: "bg-red-50 text-red-700",
-    completed: "bg-emerald-50 text-emerald-700",
-  };
-  return <span className={`w-fit rounded-full px-2.5 py-1 text-xs font-medium capitalize ${tones[status]}`}>{status}</span>;
-}
-
-function EmptyState({ text }: { text: string }) {
-  return <div className="rounded-lg bg-gray-50 py-10 text-center text-sm text-gray-500">{text}</div>;
 }
 
 export default ClinicalWorkspacePage;

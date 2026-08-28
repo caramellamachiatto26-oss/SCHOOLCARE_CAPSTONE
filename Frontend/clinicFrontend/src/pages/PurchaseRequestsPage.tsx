@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import Layout from "../layout/Layout";
+import PageFrame from "../components/PageFrame";
 import Modal from "../components/Modal";
 import { api } from "../services/api";
 import { useAuth } from "../hooks/useAuth";
@@ -8,7 +8,7 @@ import { useFormErrors } from "../hooks/useFormErrors";
 import { useToast } from "../hooks/useToast";
 import { FieldError, UnmatchedFieldErrors } from "../components/FieldError";
 import type { Medicine, PurchaseRequest, PurchaseRequestStatus } from "../utils/types";
-import AdminSectionTabs from "../components/AdminSectionTabs";
+import InventorySectionSelector from "../features/inventory/InventorySectionSelector";
 
 const emptyForm = {
   requestType: "restock" as "restock" | "new_item",
@@ -16,6 +16,7 @@ const emptyForm = {
   itemName: "",
   unit: "",
   category: "",
+  inventorySection: "",
   quantityRequested: "",
   reason: "",
 };
@@ -28,8 +29,8 @@ function displayName(value: { name: string } | string | null | undefined, fallba
   return value;
 }
 
-function PurchaseRequestsPage() {
-  const { can, role } = useAuth();
+function PurchaseRequestsPage({ embedded = false }: { embedded?: boolean }) {
+  const { can } = useAuth();
   const [searchParams] = useSearchParams();
   const { showToast } = useToast();
   const canSubmit = can("submitPurchaseRequest");
@@ -40,6 +41,9 @@ function PurchaseRequestsPage() {
 
   const [requests, setRequests] = useState<PurchaseRequest[]>([]);
   const [statusFilter, setStatusFilter] = useState<PurchaseRequestStatus | "">("");
+  const [page, setPage] = useState(1);
+  const [totalPages, setTotalPages] = useState(1);
+  const [totalRequests, setTotalRequests] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -86,13 +90,18 @@ function PurchaseRequestsPage() {
   const [operationError, setOperationError] = useState("");
   const [operationBusy, setOperationBusy] = useState(false);
 
-  const fetchRequests = async () => {
+  const fetchRequests = async (requestedPage = page) => {
     setLoading(true);
     setError("");
     try {
-      const query = statusFilter ? `?status=${statusFilter}` : "";
+      const params = new URLSearchParams({ page: String(requestedPage), limit: "20" });
+      if (statusFilter) params.set("status", statusFilter);
+      const query = `?${params.toString()}`;
       const res = await api.get<PurchaseRequest[]>(`/purchase-requests${query}`);
       setRequests(res.data);
+      setPage(res.pagination?.page ?? requestedPage);
+      setTotalPages(res.pagination?.totalPages ?? 1);
+      setTotalRequests(res.pagination?.total ?? res.data.length);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "Failed to load purchase requests");
     } finally {
@@ -101,14 +110,15 @@ function PurchaseRequestsPage() {
   };
 
   useEffect(() => {
-    fetchRequests();
+    setPage(1);
+    fetchRequests(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [statusFilter]);
 
   useEffect(() => {
     if (!canSubmit) return;
     api
-      .get<Medicine[]>("/medicines?limit=200")
+      .getAll<Medicine>("/medicines")
       .then((res) => setMedicines(res.data))
       .catch((requestError: unknown) => {
         setError(requestError instanceof Error ? requestError.message : "Failed to load inventory choices");
@@ -138,6 +148,7 @@ function PurchaseRequestsPage() {
               itemName: form.itemName,
               unit: form.unit,
               category: form.category || undefined,
+              inventorySection: form.inventorySection || undefined,
             }),
         quantityRequested: Number(form.quantityRequested),
         reason: form.reason,
@@ -241,13 +252,12 @@ function PurchaseRequestsPage() {
   };
 
   return (
-    <Layout>
-      {role === "admin" && <div className="mb-5"><AdminSectionTabs active="inventory" /></div>}
+    <PageFrame embedded={embedded}>
       <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <h2 className="text-2xl font-bold text-gray-900">Purchase Requests</h2>
           <p className="mt-1 text-sm text-gray-500">
-            Request approval to restock an existing item or purchase a medicine not yet in inventory.
+            Request approval to restock an existing item or purchase a new clinic item.
           </p>
         </div>
         {canSubmit && (
@@ -255,7 +265,7 @@ function PurchaseRequestsPage() {
             onClick={() => openCreate("new_item")}
             className="rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-blue-700"
           >
-            + Request Medicine
+            + Request Item
           </button>
         )}
       </div>
@@ -266,7 +276,8 @@ function PurchaseRequestsPage() {
         inventory batch and updates available stock automatically.
       </div>
 
-      <div className="flex gap-2 mb-4">
+      <div className="mb-4 overflow-x-auto pb-1">
+        <div className="flex min-w-max gap-2">
         {(["", "pending", "approved", "ordered", "received", "rejected", "cancelled"] as const).map((s) => (
           <button
             key={s || "all"}
@@ -280,6 +291,7 @@ function PurchaseRequestsPage() {
             {s === "" ? "All" : s[0].toUpperCase() + s.slice(1)}
           </button>
         ))}
+        </div>
       </div>
 
       {error && <p className="text-red-500 text-sm mb-3">{error}</p>}
@@ -287,8 +299,8 @@ function PurchaseRequestsPage() {
       {loading ? (
         <p className="text-gray-400 text-sm">Loading…</p>
       ) : (
-        <div className="bg-white rounded shadow overflow-hidden">
-          <table className="w-full text-sm">
+        <div className="overflow-x-auto rounded bg-white shadow">
+          <table className="min-w-[900px] w-full text-sm">
             <thead className="bg-gray-50 text-gray-500 uppercase text-xs">
               <tr>
                 <th className="text-left px-4 py-3">Item</th>
@@ -314,7 +326,7 @@ function PurchaseRequestsPage() {
                     <td className="px-4 py-3 font-medium">{r.itemName}</td>
                     <td className="px-4 py-3">
                       <span className="rounded-full bg-gray-100 px-2 py-1 text-xs font-medium text-gray-700">
-                        {r.requestType === "new_item" ? "New medicine" : "Restock"}
+                        {r.requestType === "new_item" ? "New item" : "Restock"}
                       </span>
                     </td>
                     <td className="px-4 py-3">{r.quantityRequested} {r.unit ?? ""}</td>
@@ -367,6 +379,32 @@ function PurchaseRequestsPage() {
         </div>
       )}
 
+      {!loading && totalPages > 1 && (
+        <nav className="mt-4 flex items-center justify-between gap-3" aria-label="Purchase request pages">
+          <p className="text-sm text-gray-500">
+            Page {page} of {totalPages} · {totalRequests} requests
+          </p>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              disabled={page <= 1}
+              onClick={() => fetchRequests(page - 1)}
+              className="rounded border border-gray-300 px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Previous
+            </button>
+            <button
+              type="button"
+              disabled={page >= totalPages}
+              onClick={() => fetchRequests(page + 1)}
+              className="rounded border border-gray-300 px-3 py-2 text-sm disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              Next
+            </button>
+          </div>
+        </nav>
+      )}
+
       {showCreateModal && (
         <Modal title="New Purchase Request" onClose={() => setShowCreateModal(false)} closeDisabled={saving}>
           {createFormError && <p className="text-red-500 text-sm mb-3">{createFormError}</p>}
@@ -387,7 +425,7 @@ function PurchaseRequestsPage() {
                   onClick={() => f("requestType", "new_item")}
                   className={`rounded-md px-3 py-2 text-sm font-medium ${form.requestType === "new_item" ? "bg-white shadow-sm" : "text-gray-600"}`}
                 >
-                  New Medicine
+                  New Item
                 </button>
               </div>
             </div>
@@ -412,12 +450,12 @@ function PurchaseRequestsPage() {
             ) : (
               <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                 <div className="sm:col-span-2">
-                  <label className="mb-1 block text-xs text-gray-500">Medicine Name *</label>
+                  <label className="mb-1 block text-xs text-gray-500">Item Name *</label>
                   <input
                     value={form.itemName}
                     onChange={(e) => f("itemName", e.target.value)}
                     required
-                    placeholder="e.g. Cetirizine"
+                    placeholder="e.g. Cetirizine, oxygen inhalation, or glucose strips"
                     className={`input w-full ${createFieldErrors.itemName ? "input-error" : ""}`}
                   />
                   <FieldError message={createFieldErrors.itemName} />
@@ -440,6 +478,14 @@ function PurchaseRequestsPage() {
                     onChange={(e) => f("category", e.target.value)}
                     placeholder="e.g. Antihistamine"
                     className="input w-full"
+                  />
+                </div>
+                <div className="sm:col-span-2">
+                  <label className="mb-1 block text-xs text-gray-500">Inventory Section / Label</label>
+                  <InventorySectionSelector
+                    value={form.inventorySection}
+                    onChange={(value) => f("inventorySection", value)}
+                    existingLabels={medicines.map((medicine) => medicine.inventorySection)}
                   />
                 </div>
               </div>
@@ -589,9 +635,10 @@ function PurchaseRequestsPage() {
                   />
                 </label>
                 <label className="block text-xs font-medium text-gray-600">
-                  Expiry date
+                  Expiry date *
                   <input
                     type="date"
+                    required
                     value={operationForm.expiryDate}
                     onChange={(event) => setOperationForm((current) => ({ ...current, expiryDate: event.target.value }))}
                     className="input mt-1"
@@ -639,8 +686,9 @@ function PurchaseRequestsPage() {
           </form>
         </Modal>
       )}
-    </Layout>
+    </PageFrame>
   );
 }
+
 
 export default PurchaseRequestsPage;

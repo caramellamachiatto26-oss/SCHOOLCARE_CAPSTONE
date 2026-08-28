@@ -9,45 +9,61 @@ import {
   StaffIcon,
   VisitsIcon,
 } from "../components/icons";
-import type { Appointment, ClinicVisit, DashboardStats, Patient } from "../utils/types";
+import type { Appointment, ClinicVisit, DashboardStats, InAppNotification, Patient } from "../utils/types";
 import {
   buildDashboardAlerts,
   dashboardAlertKey,
   type DashboardAlert,
 } from "../utils/dashboardAlerts";
-import AdminSectionTabs from "../components/AdminSectionTabs";
 import DoctorWorkspaceTabs from "../components/DoctorWorkspaceTabs";
+import AdminSectionTabs, { type AdminSection } from "../components/AdminSectionTabs";
 import { useToast } from "../hooks/useToast";
 import { useDashboardData } from "../features/dashboard/useDashboardData";
 import PatientQueuePage from "./PatientQueuePage";
 import AppointmentsPage from "./AppointmentsPage";
 import ClinicalWorkspacePage from "./ClinicalWorkspacePage";
 import MedicinesPage from "./MedicinesPage";
+import PurchaseRequestsPage from "./PurchaseRequestsPage";
 import UsersPage from "./UsersPage";
-import ReportsPage from "./ReportsPage";
 import PatientsPage from "./PatientsPage";
 import type { DoctorWorkspaceTab } from "../components/DoctorWorkspaceTabs";
-
-const CHART_COLORS = ["#2563eb", "#14b8a6", "#f59e0b", "#f97316", "#8b5cf6"];
+import SuperAdminDashboardPage from "./SuperAdminDashboardPage";
+import MedicationOrdersPage from "./MedicationOrdersPage";
+import { useInAppNotifications } from "../features/notifications/useInAppNotifications";
+import { patientIdentifier, patientTypeLabel } from "../utils/patient";
+import ClinicAnalytics from "../features/dashboard/ClinicAnalytics";
+import ReportsPage from "./ReportsPage";
+import PatientRecordModal from "../components/PatientRecordModal";
+import InventoryLabelsPage from "./InventoryLabelsPage";
+import SettingsPage from "./SettingsPage";
 
 function DashboardPage() {
   const { role, user } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
   const { stats, todayAppointments, error } = useDashboardData(role, user?.id);
+  const doctorNotifications = useInAppNotifications(role === "doctor");
   const alertStorageKey = `clinic-seen-alerts:${role ?? "unknown"}`;
   const [seenAlertKeys, setSeenAlertKeys] = useState<string[]>(() =>
     readSeenAlertKeys(alertStorageKey),
   );
+  const [viewingPatientId, setViewingPatientId] = useState<string | null>(null);
 
   const alerts = stats ? buildDashboardAlerts(role, stats) : [];
-  const unreadCount = alerts.filter(
+  const derivedUnreadCount = alerts.filter(
     (alert) => !seenAlertKeys.includes(dashboardAlertKey(alert)),
   ).length;
+  const unreadCount = role === "doctor" ? doctorNotifications.unreadCount : derivedUnreadCount;
   const requestedView = searchParams.get("view");
   const workspaceView =
     requestedView === "students" ||
+    requestedView === "records" ||
     requestedView === "appointments" ||
     requestedView === "inventory" ||
+    requestedView === "inventory-labels" ||
+    requestedView === "medications" ||
+    requestedView === "purchase-requests" ||
+    requestedView === "reports" ||
+    requestedView === "settings" ||
     requestedView === "notifications"
       ? requestedView
       : "visits";
@@ -56,16 +72,14 @@ function DashboardPage() {
     requestedDoctorTab === "visits" ||
     requestedDoctorTab === "records" ||
     requestedDoctorTab === "consultation" ||
-    requestedDoctorTab === "followups"
+    requestedDoctorTab === "followups" ||
+    requestedDoctorTab === "reports" ||
+    requestedDoctorTab === "notifications"
       ? requestedDoctorTab
       : "appointments";
-  const requestedAdminSection = searchParams.get("section");
-  const adminSection =
-    requestedAdminSection === "inventory" ||
-    requestedAdminSection === "management" ||
-    requestedAdminSection === "reports"
-      ? requestedAdminSection
-      : "analytics";
+  const adminSection: AdminSection = searchParams.get("section") === "purchase-requests"
+    ? "purchase-requests"
+    : "management";
 
   const openNotifications = () => {
     const currentKeys = alerts.map(dashboardAlertKey);
@@ -73,6 +87,12 @@ function DashboardPage() {
     setSeenAlertKeys(currentKeys);
     setSearchParams({ view: "notifications" }, { replace: true });
   };
+
+  const openSettings = () => {
+    setSearchParams({ view: "settings" }, { replace: true });
+  };
+
+  if (role === "superadmin") return <SuperAdminDashboardPage />;
 
   if (error) {
     return (
@@ -93,7 +113,7 @@ function DashboardPage() {
   }
 
   const dashboardTitle = `${role ? titleCase(role) : "Clinic"} Dashboard`;
-  const activeClinicalTeam = stats.usersByRole.doctor + stats.usersByRole.nurse;
+  const activeUsers = stats.usersByRole.doctor + stats.usersByRole.nurse + stats.usersByRole.staff;
   const isClinicalRole = role === "doctor" || role === "nurse";
   const isAdmin = role === "admin";
   const isDoctor = role === "doctor";
@@ -109,54 +129,82 @@ function DashboardPage() {
             </h2>
           </div>
 
-          <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          {isClinicalRole && <ClinicAnalytics />}
+
+          {isAdmin && (
+            <section className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <StatCard label="Total Patients" value={stats.totalPatients} caption={`${stats.patientsByType.student} students · ${stats.patientsByType.teacher} teachers · ${stats.patientsByType.staff} staff`} icon={<PatientsIcon />} tone="blue" />
+              <StatCard label="Active Users" value={activeUsers} caption="Available doctors, nurses, and staff" icon={<StaffIcon />} tone="purple" />
+            </section>
+          )}
+
+          {!isAdmin && <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
             {isClinicalRole ? (
               <>
                 <StatCard label="Today's Appointments" value={stats.todaysAppointments} caption="Scheduled today" icon={<CalendarIcon />} tone="blue" />
-                <StatCard label="Students Waiting" value={stats.waitingPatients} caption="In the clinic queue" icon={<PatientsIcon />} tone="orange" />
+                <StatCard label="Patients Waiting" value={stats.waitingPatients} caption="All patient types in the clinic queue" icon={<PatientsIcon />} tone="orange" />
                 <StatCard label="Consultations Today" value={stats.consultationsToday} caption="Started or completed" icon={<VisitsIcon />} tone="green" />
                 <StatCard label="Emergency Cases" value={stats.emergencyCasesToday} caption="Recorded today" icon={<VisitsIcon />} tone="red" />
               </>
             ) : isStaff ? (
               <>
-                <StatCard label="Total Students" value={stats.totalStudents} caption="Active student records" icon={<PatientsIcon />} tone="blue" />
+                <StatCard label="Total Patients" value={stats.totalPatients} caption={`${stats.patientsByType.student} students · ${stats.patientsByType.teacher} teachers · ${stats.patientsByType.staff} staff`} icon={<PatientsIcon />} tone="blue" />
                 <StatCard label="Visits Today" value={stats.todayVisits} caption="Recorded today" icon={<VisitsIcon />} tone="green" />
-                <StatCard label="Students Waiting" value={stats.waitingPatients} caption="In the clinic queue" icon={<StaffIcon />} tone="purple" />
+                <StatCard label="Patients Waiting" value={stats.waitingPatients} caption="All patient types in the clinic queue" icon={<StaffIcon />} tone="purple" />
                 <StatCard label="Pending Appointments" value={stats.pendingAppointments} caption="Awaiting confirmation" icon={<CalendarIcon />} tone="orange" />
               </>
             ) : (
               <>
-                <StatCard label="Total Students" value={stats.totalStudents} caption="Active student records" icon={<PatientsIcon />} tone="blue" />
+                <StatCard label="Total Patients" value={stats.totalPatients} caption={`${stats.patientsByType.student} students · ${stats.patientsByType.teacher} teachers · ${stats.patientsByType.staff} staff`} icon={<PatientsIcon />} tone="blue" />
                 <StatCard label="Clinic Visits Today" value={stats.todayVisits} caption="Recorded today" icon={<VisitsIcon />} tone="green" />
-                <StatCard label="Active Doctor / Nurse" value={activeClinicalTeam} caption="Currently available" icon={<StaffIcon />} tone="purple" />
+                <StatCard label="Active Users" value={activeUsers} caption="Available doctors, nurses, and staff" icon={<StaffIcon />} tone="purple" />
                 <StatCard label="Pending Appointments" value={stats.pendingAppointments} caption="Awaiting confirmation" icon={<CalendarIcon />} tone="orange" />
               </>
             )}
-          </section>
+          </section>}
 
           {isAdmin && <AdminSectionTabs active={adminSection} />}
 
-          {isDoctor && <DoctorWorkspaceTabs active={doctorTab} />}
+          {isDoctor && (
+            <DoctorWorkspaceTabs
+              active={doctorTab}
+              unreadCount={unreadCount}
+            />
+          )}
 
           {!isAdmin && !isDoctor && (
             <RoleWorkspaceTabs
               role={role}
               unreadCount={unreadCount}
               activeView={workspaceView}
+              onOpenSettings={openSettings}
               onOpenNotifications={openNotifications}
             />
           )}
         </div>
 
+        <div className="min-h-[32rem] [overflow-anchor:none]">
         {!isAdmin && !isDoctor ? (
           workspaceView === "notifications" ? (
             <NotificationsPanel alerts={alerts} />
+          ) : workspaceView === "settings" ? (
+            <SettingsPage embedded />
           ) : workspaceView === "students" ? (
             <section className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm sm:p-5">
               <PatientsPage embedded />
             </section>
+          ) : workspaceView === "records" ? (
+            <ClinicalWorkspacePage embedded />
           ) : workspaceView === "inventory" ? (
             <MedicinesPage embedded />
+          ) : workspaceView === "inventory-labels" ? (
+            <InventoryLabelsPage embedded />
+          ) : workspaceView === "medications" ? (
+            <MedicationOrdersPage embedded />
+          ) : workspaceView === "purchase-requests" ? (
+            <PurchaseRequestsPage embedded />
+          ) : workspaceView === "reports" ? (
+            <ReportsPage embedded />
           ) : workspaceView === "appointments" ? (
             <AppointmentsPage embedded />
           ) : (
@@ -165,42 +213,48 @@ function DashboardPage() {
             </section>
           )
         ) : isDoctor ? (
-          doctorTab === "appointments" ? (
+          doctorTab === "notifications" ? (
+            <InAppNotificationsPanel
+              notifications={doctorNotifications.items}
+              unreadCount={doctorNotifications.unreadCount}
+              error={doctorNotifications.error}
+              loading={doctorNotifications.loading}
+              onRead={doctorNotifications.markRead}
+              onMarkAllRead={doctorNotifications.markAllRead}
+              onRetry={doctorNotifications.refresh}
+            />
+          ) : doctorTab === "appointments" ? (
             <>
               <TodayAppointments appointments={todayAppointments} />
-              <RecentCases cases={stats.recentCases} title="Recent Consultations" />
+              <RecentCases
+                cases={stats.recentCases}
+                title="Recent Consultations"
+                onViewPatient={setViewingPatientId}
+              />
             </>
           ) : doctorTab === "visits" ? (
             <section className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm sm:p-5">
               <PatientQueuePage embedded />
             </section>
+          ) : doctorTab === "reports" ? (
+            <ReportsPage embedded />
           ) : (
             <ClinicalWorkspacePage embedded />
           )
         ) : isAdmin ? (
-          adminSection === "inventory" ? (
-            <MedicinesPage embedded />
-          ) : adminSection === "management" ? (
-            <UsersPage embedded />
-          ) : adminSection === "reports" ? (
-            <ReportsPage embedded />
+          adminSection === "purchase-requests" ? (
+            <section className="rounded-xl border border-gray-200 bg-white p-4 shadow-sm sm:p-5">
+              <PurchaseRequestsPage embedded />
+            </section>
           ) : (
-            <>
-              <section className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-                <CommonComplaintsChart items={stats.commonComplaints} />
-                <MonthlyVisitsChart items={stats.monthlyVisits} />
-              </section>
-              <ActiveTeam users={stats.activeUsers} counts={stats.usersByRole} />
-              <section className="rounded-xl border border-emerald-200 bg-emerald-50 px-5 py-4">
-                <h3 className="font-semibold text-emerald-950">Student privacy protected</h3>
-                <p className="mt-1 text-sm text-emerald-800">
-                  Admin analytics use aggregate clinic totals. Individual complaints, assessments,
-                  treatments, and medical histories are limited to authorized clinical roles.
-                </p>
-              </section>
-            </>
+            <UsersPage embedded />
           )
         ) : null}
+        </div>
+        <PatientRecordModal
+          patientId={viewingPatientId}
+          onClose={() => setViewingPatientId(null)}
+        />
       </div>
     </Layout>
   );
@@ -221,18 +275,22 @@ function RoleWorkspaceTabs({
   role,
   unreadCount,
   activeView,
+  onOpenSettings,
   onOpenNotifications,
 }: {
   role: string | null;
   unreadCount: number;
-  activeView: "students" | "visits" | "appointments" | "inventory" | "notifications";
+  activeView: "students" | "records" | "visits" | "appointments" | "inventory" | "inventory-labels" | "medications" | "purchase-requests" | "reports" | "settings" | "notifications";
+  onOpenSettings: () => void;
   onOpenNotifications: () => void;
 }) {
   const tabs = [
-    { label: "Students", to: "/dashboard?view=students", view: "students", roles: ["nurse", "staff"] },
-    { label: "Student Visits", to: "/dashboard?view=visits", view: "visits", roles: ["nurse", "staff"] },
+    { label: "Patients", to: "/dashboard?view=students", view: "students", roles: ["nurse", "staff"] },
+    { label: "Patient Visits", to: "/dashboard?view=visits", view: "visits", roles: ["nurse", "staff"] },
     { label: "Appointments", to: "/dashboard?view=appointments", view: "appointments", roles: ["nurse", "staff"] },
     { label: "Inventory", to: "/dashboard?view=inventory", view: "inventory", roles: ["nurse"] },
+    { label: "Purchase Requests", to: "/dashboard?view=purchase-requests", view: "purchase-requests", roles: ["nurse"] },
+    { label: "Medication Requests", to: "/dashboard?view=medications", view: "medications", roles: ["nurse"] },
   ].filter((tab) => role && tab.roles.includes(role));
 
   return (
@@ -252,6 +310,19 @@ function RoleWorkspaceTabs({
             {tab.label}
           </Link>
         ))}
+        {role === "nurse" && (
+          <Link
+            to="/dashboard?view=reports"
+            aria-current={activeView === "reports" ? "page" : undefined}
+            className={`border-b-2 px-5 py-3 text-sm font-medium transition-colors ${
+              activeView === "reports"
+                ? "border-blue-600 bg-blue-50/70 text-blue-700"
+                : "border-transparent text-slate-600 hover:bg-slate-50 hover:text-slate-950"
+            }`}
+          >
+            Reports
+          </Link>
+        )}
         <button
           type="button"
           onClick={onOpenNotifications}
@@ -268,6 +339,20 @@ function RoleWorkspaceTabs({
             </span>
           )}
         </button>
+        {role === "nurse" && (
+          <button
+            type="button"
+            onClick={onOpenSettings}
+            aria-current={activeView === "settings" ? "page" : undefined}
+            className={`border-b-2 px-5 py-3 text-sm font-medium transition-colors ${
+              activeView === "settings"
+                ? "border-blue-600 bg-blue-50/70 text-blue-700"
+                : "border-transparent text-slate-600 hover:bg-slate-50 hover:text-slate-950"
+            }`}
+          >
+            Settings
+          </button>
+        )}
       </div>
     </nav>
   );
@@ -309,6 +394,102 @@ function NotificationsPanel({ alerts }: { alerts: DashboardAlert[] }) {
   );
 }
 
+function InAppNotificationsPanel({
+  notifications,
+  unreadCount,
+  error,
+  loading,
+  onRead,
+  onMarkAllRead,
+  onRetry,
+}: {
+  notifications: InAppNotification[];
+  unreadCount: number;
+  error: string;
+  loading: boolean;
+  onRead: (id: string) => Promise<void>;
+  onMarkAllRead: () => Promise<void>;
+  onRetry: () => Promise<void>;
+}) {
+  const [filter, setFilter] = useState<"all" | "unread">("all");
+  const visibleNotifications = filter === "unread"
+    ? notifications.filter((notification) => !notification.readAt)
+    : notifications;
+
+  return (
+    <section className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+      <div className="flex flex-col gap-4 border-b border-gray-100 px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <h3 className="font-semibold text-gray-900">Notifications</h3>
+          <p className="mt-1 text-xs text-gray-500">Appointments and clinic cases assigned to you</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="flex rounded-lg border border-gray-200 p-1" aria-label="Filter notifications">
+            {(["all", "unread"] as const).map((option) => (
+              <button
+                key={option}
+                type="button"
+                onClick={() => setFilter(option)}
+                aria-pressed={filter === option}
+                className={`min-h-9 rounded-md px-3 text-xs font-medium capitalize ${filter === option ? "bg-slate-900 text-white" : "text-gray-600 hover:bg-gray-50"}`}
+              >
+                {option}{option === "unread" && unreadCount > 0 ? ` (${unreadCount})` : ""}
+              </button>
+            ))}
+          </div>
+          {unreadCount > 0 && (
+            <button type="button" onClick={() => void onMarkAllRead()} className="min-h-11 text-xs font-medium text-blue-600 hover:underline">
+              Mark all read
+            </button>
+          )}
+        </div>
+      </div>
+      {loading ? (
+        <div role="status" aria-label="Loading notifications" className="space-y-3 px-5 py-5">
+          {[0, 1, 2].map((item) => <div key={item} className="h-16 animate-pulse rounded-lg bg-gray-100" />)}
+        </div>
+      ) : error ? (
+        <div className="flex items-center justify-between gap-3 px-5 py-4 text-sm text-red-600">
+          <span>{error}</span>
+          <button type="button" onClick={() => void onRetry()} className="min-h-11 font-medium underline">Retry</button>
+        </div>
+      ) : visibleNotifications.length === 0 ? (
+        <p className="px-5 py-10 text-center text-sm text-gray-500">
+          {filter === "unread" ? "No unread notifications." : "You’re all caught up."}
+        </p>
+      ) : (
+        <div className="divide-y divide-gray-100">
+          {visibleNotifications.map((notification) => (
+            <Link
+              key={notification._id}
+              to={dashboardNotificationLink(notification.link)}
+              onClick={() => void onRead(notification._id)}
+              className={`flex items-start gap-3 px-5 py-4 hover:bg-gray-50 ${notification.readAt ? "opacity-70" : "bg-blue-50/30"}`}
+            >
+              <span className={`mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full ${notification.kind === "emergency" || notification.kind === "appointment_cancelled" ? "bg-red-500" : "bg-blue-500"}`} />
+              <span className="min-w-0 flex-1">
+                <span className="block text-sm font-semibold text-gray-900">{notification.title}</span>
+                <span className="mt-0.5 block text-sm text-gray-600">{notification.message}</span>
+                <span className="mt-1 block text-xs text-gray-400">{new Date(notification.createdAt).toLocaleString()}</span>
+              </span>
+              <span className="text-xs font-medium text-blue-600">View</span>
+            </Link>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function dashboardNotificationLink(link: string): string {
+  if (link.startsWith("/clinical-workspace?")) {
+    return `/dashboard?${link.slice(link.indexOf("?") + 1)}`;
+  }
+  if (link === "/patient-queue") return "/dashboard?tab=visits";
+  if (link === "/appointments") return "/dashboard?tab=appointments";
+  return link;
+}
+
 function StatCard({
   label,
   value,
@@ -331,161 +512,16 @@ function StatCard({
   };
 
   return (
-    <article className="flex h-36 flex-col rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
+    <article className="flex min-h-28 flex-col rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
       <div className="flex items-start justify-between gap-4">
         <p className="text-sm font-medium text-gray-600">{label}</p>
         <span className={`rounded-lg p-2 ${tones[tone]}`}>{icon}</span>
       </div>
       <div className="mt-auto">
-        <p className="text-3xl font-semibold tracking-tight text-slate-900">{value}</p>
+        <p className="text-2xl font-semibold tracking-tight text-slate-900">{value}</p>
         <p className="mt-1 text-xs text-slate-400">{caption}</p>
       </div>
     </article>
-  );
-}
-
-function CommonComplaintsChart({
-  items,
-}: {
-  items: DashboardStats["commonComplaints"];
-}) {
-  const total = items.reduce((sum, item) => sum + item.count, 0);
-  let current = 0;
-  const segments = items.map((item, index) => {
-    const start = current;
-    current += total > 0 ? (item.count / total) * 100 : 0;
-    return `${CHART_COLORS[index % CHART_COLORS.length]} ${start}% ${current}%`;
-  });
-  const background = total > 0 ? `conic-gradient(${segments.join(", ")})` : "#e5e7eb";
-
-  return (
-    <article className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-      <div>
-        <h3 className="font-semibold text-gray-900">Most Common Complaints</h3>
-        <p className="mt-1 text-xs text-gray-500">Based on recorded clinic visits</p>
-      </div>
-      {items.length === 0 ? (
-        <EmptyChart label="No clinic complaints recorded yet." />
-      ) : (
-        <div className="mt-6 flex flex-col items-center gap-7 sm:flex-row sm:justify-center">
-          <div
-            className="relative h-48 w-48 shrink-0 rounded-full"
-            style={{ background }}
-            aria-label="Common complaints chart"
-          >
-            <div className="absolute inset-12 flex items-center justify-center rounded-full bg-white text-center">
-              <div>
-                <p className="text-2xl font-bold text-gray-900">{total}</p>
-                <p className="text-[11px] text-gray-500">recorded visits</p>
-              </div>
-            </div>
-          </div>
-          <div className="grid w-full gap-3 sm:max-w-xs">
-            {items.map((item, index) => (
-              <div key={item.label} className="flex items-center gap-3 text-sm">
-                <span
-                  className="h-2.5 w-2.5 shrink-0 rounded-full"
-                  style={{ backgroundColor: CHART_COLORS[index % CHART_COLORS.length] }}
-                />
-                <span className="min-w-0 flex-1 truncate text-gray-700">{item.label}</span>
-                <span className="font-medium text-gray-900">
-                  {Math.round((item.count / total) * 100)}%
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </article>
-  );
-}
-
-function MonthlyVisitsChart({
-  items,
-}: {
-  items: DashboardStats["monthlyVisits"];
-}) {
-  const max = Math.max(...items.map((item) => item.visits), 1);
-
-  return (
-    <article className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-      <div>
-        <h3 className="font-semibold text-gray-900">Monthly Clinic Visits</h3>
-        <p className="mt-1 text-xs text-gray-500">Last six months</p>
-      </div>
-      <div className="mt-6 flex h-64 items-end gap-2 border-b border-l border-gray-200 px-3 pt-4 sm:gap-4">
-        {items.map((item) => (
-          <div key={item.key} className="flex h-full min-w-0 flex-1 flex-col justify-end">
-            <div className="flex min-h-0 flex-1 items-end">
-              <div
-                className="group relative w-full rounded-t bg-blue-500 transition-colors hover:bg-blue-600"
-                style={{ height: item.visits > 0 ? `${Math.max((item.visits / max) * 100, 5)}%` : "2px" }}
-              >
-                <span className="absolute -top-7 left-1/2 hidden -translate-x-1/2 rounded bg-gray-900 px-2 py-1 text-xs text-white group-hover:block">
-                  {item.visits}
-                </span>
-              </div>
-            </div>
-            <div className="h-8 pt-2 text-center text-xs text-gray-500">{item.month}</div>
-          </div>
-        ))}
-      </div>
-    </article>
-  );
-}
-
-function ActiveTeam({
-  users,
-  counts,
-}: {
-  users: DashboardStats["activeUsers"];
-  counts: DashboardStats["usersByRole"];
-}) {
-  return (
-    <section className="rounded-xl border border-gray-200 bg-white p-5 shadow-sm">
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <h3 className="font-semibold text-gray-900">Active Clinic Team</h3>
-          <p className="mt-1 text-xs text-gray-500">
-            Available doctors, nurses, and support staff
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-2 text-xs">
-          <CountBadge label="Doctors" value={counts.doctor} tone="violet" />
-          <CountBadge label="Nurses" value={counts.nurse} tone="blue" />
-          <CountBadge label="Staff" value={counts.staff} tone="slate" />
-        </div>
-      </div>
-
-      {users.length === 0 ? (
-        <p className="mt-6 rounded-lg bg-gray-50 py-8 text-center text-sm text-gray-500">
-          No team members are currently marked available.
-        </p>
-      ) : (
-        <div className="mt-5 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {users.map((user) => (
-            <article key={user.id} className="rounded-lg border border-gray-200 p-4">
-              <div className="flex items-center gap-3">
-                <div className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-slate-100 font-semibold text-slate-700">
-                  {initials(user.name)}
-                  <span className="absolute bottom-0 right-0 h-3 w-3 rounded-full border-2 border-white bg-emerald-500" />
-                </div>
-                <div className="min-w-0">
-                  <p className="truncate text-sm font-semibold text-gray-900">{user.name}</p>
-                  <p className="truncate text-xs text-gray-500">{user.email}</p>
-                </div>
-                <span className="ml-auto rounded-full bg-gray-100 px-2 py-1 text-[11px] font-medium capitalize text-gray-600">
-                  {user.role}
-                </span>
-              </div>
-              {user.scheduleNotes && (
-                <p className="mt-3 border-t pt-3 text-xs text-gray-500">{user.scheduleNotes}</p>
-              )}
-            </article>
-          ))}
-        </div>
-      )}
-    </section>
   );
 }
 
@@ -501,7 +537,7 @@ function TodayAppointments({ appointments }: { appointments: Appointment[] }) {
 
   const startConsultation = async (appointment: Appointment, student: Patient | null) => {
     if (!student) {
-      showToast("Student record is unavailable.");
+      showToast("Student record is unavailable.", "error");
       return;
     }
 
@@ -516,14 +552,14 @@ function TodayAppointments({ appointments }: { appointments: Appointment[] }) {
           ? appointment.visitId
           : linkedVisit?._id ?? "";
       if (!visitId) {
-        showToast("Waiting for nurse check-in and triage before consultation");
+        showToast("Waiting for nurse check-in and triage before consultation", "warning");
         return;
       }
 
       const currentVisit = linkedVisit ??
         (await api.get<ClinicVisit>(`/visits/${visitId}`)).data;
       if (!currentVisit.readyForDoctor) {
-        showToast("A nurse must record triage and mark the student ready first");
+        showToast("A nurse must record triage and mark the student ready first", "warning");
         return;
       }
       await api.put(`/visits/${visitId}/status`, { status: "in_consultation" });
@@ -532,11 +568,10 @@ function TodayAppointments({ appointments }: { appointments: Appointment[] }) {
         appointmentId: appointment._id,
         visitId,
         patientId: student._id,
-        complaint: appointment.reason,
       });
       navigate(`/dashboard?${params}`);
     } catch (error: unknown) {
-      showToast(error instanceof Error ? error.message : "Failed to start consultation");
+      showToast(error instanceof Error ? error.message : "Failed to start consultation", "error");
     } finally {
       setStartingId("");
     }
@@ -553,7 +588,7 @@ function TodayAppointments({ appointments }: { appointments: Appointment[] }) {
       );
       showToast(response.message);
     } catch (error: unknown) {
-      showToast(error instanceof Error ? error.message : "Failed to confirm appointment");
+      showToast(error instanceof Error ? error.message : "Failed to confirm appointment", "error");
     } finally {
       setConfirmingId("");
     }
@@ -575,8 +610,8 @@ function TodayAppointments({ appointments }: { appointments: Appointment[] }) {
             <thead className="bg-gray-50 text-left text-xs uppercase text-gray-500">
               <tr>
                 <th className="px-5 py-3">Time</th>
-                <th className="px-5 py-3">Student</th>
-                <th className="px-5 py-3">Student ID</th>
+                <th className="px-5 py-3">Patient</th>
+                <th className="px-5 py-3">Patient ID</th>
                 <th className="px-5 py-3">Reason</th>
                 <th className="px-5 py-3">Status</th>
                 <th className="px-5 py-3">Action</th>
@@ -603,8 +638,8 @@ function TodayAppointments({ appointments }: { appointments: Appointment[] }) {
                     <td className="whitespace-nowrap px-5 py-4 font-medium">
                       {new Date(appointment.appointmentDate).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
                     </td>
-                    <td className="px-5 py-4">{student ? `${student.firstName} ${student.lastName}` : "Unknown student"}</td>
-                    <td className="px-5 py-4 font-mono text-xs">{student?.studentId ?? "—"}</td>
+                    <td className="px-5 py-4">{student ? `${student.firstName} ${student.lastName}` : "Unknown patient"}</td>
+                    <td className="px-5 py-4 font-mono text-xs">{student ? `${patientIdentifier(student)} · ${patientTypeLabel(student)}` : "—"}</td>
                     <td className="px-5 py-4">{appointment.reason}</td>
                     <td className="px-5 py-4">
                       <span className={`rounded-full px-2.5 py-1 text-xs font-medium capitalize ${
@@ -660,9 +695,11 @@ function TodayAppointments({ appointments }: { appointments: Appointment[] }) {
 function RecentCases({
   cases,
   title = "Recent Medical Cases",
+  onViewPatient,
 }: {
   cases: DashboardStats["recentCases"];
   title?: string;
+  onViewPatient: (patientId: string) => void;
 }) {
   const doctorView = title === "Recent Consultations";
 
@@ -682,9 +719,9 @@ function RecentCases({
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     {caseItem.student ? (
-                      <Link to={`/patients/${caseItem.student.id}`} className="font-medium text-blue-600 hover:underline">
+                      <button type="button" onClick={() => onViewPatient(caseItem.student!.id)} className="text-left font-medium text-blue-600 hover:underline">
                         {caseItem.student.name}
-                      </Link>
+                      </button>
                     ) : (
                       <span className="font-medium text-gray-700">Archived student</span>
                     )}
@@ -692,7 +729,7 @@ function RecentCases({
                       {new Date(caseItem.date).toLocaleDateString()}
                     </p>
                   </div>
-                  {!doctorView && <ProviderBadge provider={caseItem.provider} />}
+                  <ProviderBadge provider={caseItem.provider} />
                 </div>
                 <div className="grid gap-2 text-sm">
                   <p><span className="text-gray-400">Complaint:</span> {caseItem.complaint}</p>
@@ -708,11 +745,11 @@ function RecentCases({
               <thead className="bg-gray-50 text-left text-xs uppercase text-gray-500">
                 <tr>
                   <th className="px-5 py-3 font-medium">Date</th>
-                  <th className="px-5 py-3 font-medium">Student</th>
+                  <th className="px-5 py-3 font-medium">Patient</th>
                   <th className="px-5 py-3 font-medium">Complaint</th>
                   <th className="px-5 py-3 font-medium">{doctorView ? "Diagnosis" : "Assessment / Findings"}</th>
                   <th className="px-5 py-3 font-medium">Treatment</th>
-                  {!doctorView && <th className="px-5 py-3 font-medium">Doctor / Nurse</th>}
+                  <th className="px-5 py-3 font-medium">Attending Clinician</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
@@ -724,10 +761,10 @@ function RecentCases({
                     <td className="px-5 py-3">
                       {caseItem.student ? (
                         <>
-                          <Link to={`/patients/${caseItem.student.id}`} className="font-medium text-blue-600 hover:underline">
+                          <button type="button" onClick={() => onViewPatient(caseItem.student!.id)} className="text-left font-medium text-blue-600 hover:underline">
                             {caseItem.student.name}
-                          </Link>
-                          <p className="text-xs text-gray-400">{caseItem.student.studentId}</p>
+                          </button>
+                          <p className="text-xs text-gray-400">{caseItem.student.studentId} · {caseItem.student.patientType === "student" ? "Student" : caseItem.student.patientType === "teacher" ? "Teacher" : "Staff"}</p>
                         </>
                       ) : (
                         <span className="text-gray-400">Archived student</span>
@@ -736,7 +773,7 @@ function RecentCases({
                     <td className="max-w-xs px-5 py-3 text-gray-700">{caseItem.complaint}</td>
                     <td className="max-w-sm px-5 py-3 text-gray-700">{caseItem.assessment}</td>
                     <td className="max-w-sm px-5 py-3 text-gray-700">{caseItem.treatment}</td>
-                    {!doctorView && <td className="px-5 py-3"><ProviderBadge provider={caseItem.provider} /></td>}
+                    <td className="px-5 py-3"><ProviderBadge provider={caseItem.provider} /></td>
                   </tr>
                 ))}
               </tbody>
@@ -762,31 +799,6 @@ function ProviderBadge({
   );
 }
 
-function CountBadge({
-  label,
-  value,
-  tone,
-}: {
-  label: string;
-  value: number;
-  tone: "violet" | "blue" | "slate";
-}) {
-  const tones = {
-    violet: "bg-violet-50 text-violet-700",
-    blue: "bg-blue-50 text-blue-700",
-    slate: "bg-slate-100 text-slate-700",
-  };
-  return <span className={`rounded-full px-3 py-1.5 ${tones[tone]}`}>{label} {value}</span>;
-}
-
-function EmptyChart({ label }: { label: string }) {
-  return (
-    <div className="mt-6 flex h-64 items-center justify-center rounded-lg bg-gray-50 text-sm text-gray-500">
-      {label}
-    </div>
-  );
-}
-
 function DashboardSkeleton() {
   return (
     <div className="mx-auto max-w-[1600px] animate-pulse space-y-5">
@@ -806,14 +818,6 @@ function DashboardSkeleton() {
 
 function titleCase(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
-}
-
-function initials(name: string): string {
-  return name
-    .split(/\s+/)
-    .slice(0, 2)
-    .map((part) => part.charAt(0).toUpperCase())
-    .join("");
 }
 
 export default DashboardPage;

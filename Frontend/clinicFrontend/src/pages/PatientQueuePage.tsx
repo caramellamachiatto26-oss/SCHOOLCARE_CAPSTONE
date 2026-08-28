@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import Layout from "../layout/Layout";
+import PageFrame from "../components/PageFrame";
 import Modal from "../components/Modal";
 import { api } from "../services/api";
 import { useAuth } from "../hooks/useAuth";
@@ -8,9 +8,14 @@ import { useFormErrors } from "../hooks/useFormErrors";
 import { useToast } from "../hooks/useToast";
 import { FieldError, UnmatchedFieldErrors } from "../components/FieldError";
 import { patientsListPath } from "../config/permissions";
-import type { ClinicVisit, Patient } from "../utils/types";
+import type { ClinicVisit, LatestPatientVitals, Patient } from "../utils/types";
 import { reportFilename, saveBlobDownload } from "../utils/download";
-import type { ReactNode } from "react";
+import { notifyClinicAnalyticsUpdated } from "../utils/clinicEvents";
+import ClinicalProfileEditor from "../features/patients/ClinicalProfileEditor";
+import { patientIdentifier, patientTypeLabel } from "../utils/patient";
+import { BmiPreview } from "../components/BmiPreview";
+import SearchablePatientSelect from "../components/SearchablePatientSelect";
+import PatientRecordModal from "../components/PatientRecordModal";
 
 // Clinic-wide queue of open visits sorted by arrival time.
 const POLL_INTERVAL_MS = 15000;
@@ -40,8 +45,8 @@ const emptyVitalsForm = {
 const VITALS_FORM_FIELDS = Object.keys(emptyVitalsForm);
 
 function patientLabel(p: ClinicVisit["patientId"]): string {
-  if (p && typeof p === "object") return `${p.firstName} ${p.lastName} (${p.studentId})`;
-  return "Unknown Student";
+  if (p && typeof p === "object") return `${p.firstName} ${p.lastName} (${patientIdentifier(p)}) · ${patientTypeLabel(p)}`;
+  return "Unknown Patient";
 }
 
 function patientLink(p: ClinicVisit["patientId"]): string | null {
@@ -55,6 +60,7 @@ function vitalsSummary(v: ClinicVisit): string {
       v.temperature && `${v.temperature}°C`,
       v.bloodPressure && `BP: ${v.bloodPressure}`,
       v.pulseRate && `PR: ${v.pulseRate}`,
+      v.bmi != null && `BMI: ${v.bmi}`,
     ]
       .filter(Boolean)
       .join(" · ") || "Vitals not yet recorded"
@@ -69,10 +75,6 @@ function hasCompleteCoreVitals(v: ClinicVisit): boolean {
   return Boolean(v.bloodPressure && v.temperature != null && v.pulseRate != null);
 }
 
-function PageFrame({ embedded, children }: { embedded: boolean; children: ReactNode }) {
-  return embedded ? <>{children}</> : <Layout>{children}</Layout>;
-}
-
 function PatientQueuePage({ embedded = false }: { embedded?: boolean }) {
   const { role, can } = useAuth();
   const { showToast } = useToast();
@@ -85,12 +87,17 @@ function PatientQueuePage({ embedded = false }: { embedded?: boolean }) {
   const requestedEmergencyId = searchParams.get("emergency") ?? "";
   const emergencyFocusToken = searchParams.get("focus") ?? "";
   const handledEmergencyFocus = useRef("");
+  const latestVitalsRequest = useRef(0);
 
   const [queue, setQueue] = useState<ClinicVisit[]>([]);
+  const [visitSearch, setVisitSearch] = useState("");
+  const [patientTypeFilter, setPatientTypeFilter] = useState<"all" | "student" | "teacher" | "staff">("all");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [viewingPatientId, setViewingPatientId] = useState<string | null>(null);
 
   const [patients, setPatients] = useState<Patient[]>([]);
+  const [patientsLoading, setPatientsLoading] = useState(canCheckIn);
 
   const [showCheckIn, setShowCheckIn] = useState(canCheckIn && Boolean(requestedPatientId));
   const [checkInForm, setCheckInForm] = useState({
@@ -109,6 +116,8 @@ function PatientQueuePage({ embedded = false }: { embedded?: boolean }) {
 
   const [vitalsTarget, setVitalsTarget] = useState<ClinicVisit | null>(null);
   const [vitalsForm, setVitalsForm] = useState(emptyVitalsForm);
+  const [prefilledHeightRecordedAt, setPrefilledHeightRecordedAt] = useState<string | null>(null);
+  const [prefilledWeightRecordedAt, setPrefilledWeightRecordedAt] = useState<string | null>(null);
   const {
     formError: vitalsFormError,
     fieldErrors: vitalsFieldErrors,
@@ -129,19 +138,22 @@ function PatientQueuePage({ embedded = false }: { embedded?: boolean }) {
   });
   const [savingStatus, setSavingStatus] = useState(false);
   const [statusError, setStatusError] = useState("");
+  const [pendingReferralDownload, setPendingReferralDownload] = useState<string | null>(null);
 
   const fetchQueue = useCallback(async (showSpinner = false) => {
     if (showSpinner) setLoading(true);
     setError("");
     try {
-      const res = await api.get<ClinicVisit[]>("/visits/queue");
+      const params = new URLSearchParams();
+      if (patientTypeFilter !== "all") params.set("patientType", patientTypeFilter);
+      const res = await api.get<ClinicVisit[]>(`/visits/queue?${params}`);
       setQueue(res.data);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load student queue");
+      setError(err instanceof Error ? err.message : "Failed to load patient visits");
     } finally {
       if (showSpinner) setLoading(false);
     }
-  }, []);
+  }, [patientTypeFilter]);
 
   useEffect(() => {
     fetchQueue(true);
@@ -152,12 +164,17 @@ function PatientQueuePage({ embedded = false }: { embedded?: boolean }) {
   useEffect(() => {
     if (!canCheckIn) return;
     const path = patientsListPath(role);
-    if (!path) return;
-    api.get<Patient[]>(path)
+    if (!path) {
+      setPatientsLoading(false);
+      return;
+    }
+    setPatientsLoading(true);
+    api.getAll<Patient>(path)
       .then((res) => setPatients(res.data))
       .catch((requestError: unknown) => {
-        setError(requestError instanceof Error ? requestError.message : "Failed to load students");
-      });
+        setError(requestError instanceof Error ? requestError.message : "Failed to load patients");
+      })
+      .finally(() => setPatientsLoading(false));
   }, [canCheckIn, role]);
 
   const openCheckIn = (patientId = "") => {
@@ -204,7 +221,11 @@ function PatientQueuePage({ embedded = false }: { embedded?: boolean }) {
   };
 
   const openVitals = useCallback((v: ClinicVisit) => {
+    const requestId = ++latestVitalsRequest.current;
+    const patientId = typeof v.patientId === "object" ? v.patientId._id : v.patientId;
     setVitalsTarget(v);
+    setPrefilledHeightRecordedAt(null);
+    setPrefilledWeightRecordedAt(null);
     setVitalsForm({
       complaint: v.complaint,
       treatment: v.treatment ?? "",
@@ -217,7 +238,31 @@ function PatientQueuePage({ embedded = false }: { embedded?: boolean }) {
       weightKg: v.weightKg != null ? String(v.weightKg) : "",
     });
     resetVitalsErrors();
+
+    if ((v.heightCm != null && v.weightKg != null) || !patientId) return;
+    api.get<LatestPatientVitals | null>(`/visits/patient/${patientId}/latest-vitals`)
+      .then((response) => {
+        const latestVitals = response.data;
+        if (latestVitalsRequest.current !== requestId || !latestVitals) return;
+        setVitalsForm((current) => ({
+          ...current,
+          heightCm: current.heightCm || (latestVitals.heightCm != null ? String(latestVitals.heightCm) : ""),
+          weightKg: current.weightKg || (latestVitals.weightKg != null ? String(latestVitals.weightKg) : ""),
+        }));
+        if (v.heightCm == null) setPrefilledHeightRecordedAt(latestVitals.heightRecordedAt ?? null);
+        if (v.weightKg == null) setPrefilledWeightRecordedAt(latestVitals.weightRecordedAt ?? null);
+      })
+      .catch(() => {
+        // Previous weight is optional; triage remains available if lookup fails.
+      });
   }, [resetVitalsErrors]);
+
+  const closeVitals = () => {
+    latestVitalsRequest.current += 1;
+    setPrefilledHeightRecordedAt(null);
+    setPrefilledWeightRecordedAt(null);
+    setVitalsTarget(null);
+  };
 
   useEffect(() => {
     if (!requestedEmergencyId || queue.length === 0) return;
@@ -243,6 +288,8 @@ function PatientQueuePage({ embedded = false }: { embedded?: boolean }) {
   }, [emergencyFocusToken, openVitals, queue, requestedEmergencyId, role]);
 
   const vf = (k: keyof typeof emptyVitalsForm, v: string) => {
+    if (k === "heightCm") setPrefilledHeightRecordedAt(null);
+    if (k === "weightKg") setPrefilledWeightRecordedAt(null);
     setVitalsForm((prev) => ({ ...prev, [k]: v }));
     clearVitalsField(k);
   };
@@ -266,8 +313,9 @@ function PatientQueuePage({ embedded = false }: { embedded?: boolean }) {
         heightCm: vitalsForm.heightCm ? Number(vitalsForm.heightCm) : undefined,
         weightKg: vitalsForm.weightKg ? Number(vitalsForm.weightKg) : undefined,
       });
+      notifyClinicAnalyticsUpdated();
       showToast(res.message);
-      setVitalsTarget(null);
+      closeVitals();
       fetchQueue(false);
     } catch (err: unknown) {
       applyVitalsError(err, "Save failed");
@@ -282,7 +330,30 @@ function PatientQueuePage({ embedded = false }: { embedded?: boolean }) {
       showToast(res.message);
       fetchQueue(false);
     } catch (err: unknown) {
-      showToast(err instanceof Error ? err.message : "Failed to update");
+      showToast(err instanceof Error ? err.message : "Failed to update", "error");
+    }
+  };
+
+  const downloadReferral = async (visitId: string) => {
+    const referral = await api.download(`/visits/${visitId}/referral-form`);
+    if (!referral.ok) {
+      throw new Error(`Referral form download failed (${referral.status})`);
+    }
+    const blob = await referral.blob();
+    saveBlobDownload(
+      blob,
+      reportFilename(referral.headers.get("Content-Disposition"), `Referral_${visitId}.docx`),
+    );
+  };
+
+  const retryReferralDownload = async () => {
+    if (!pendingReferralDownload) return;
+    try {
+      await downloadReferral(pendingReferralDownload);
+      setPendingReferralDownload(null);
+      showToast("Referral form downloaded successfully");
+    } catch (error: unknown) {
+      showToast(error instanceof Error ? error.message : "Referral form download failed", "error");
     }
   };
 
@@ -294,21 +365,23 @@ function PatientQueuePage({ embedded = false }: { embedded?: boolean }) {
     const body: Record<string, string> = { status, ...details };
     try {
       const res = await api.put(`/visits/${v._id}/status`, body);
-      showToast(res.message);
       if (status === "referred") {
-        const referral = await api.download(`/visits/${v._id}/referral-form`);
-        if (referral.ok) {
-          const blob = await referral.blob();
-          saveBlobDownload(
-            blob,
-            reportFilename(referral.headers.get("Content-Disposition"), `Referral_${v._id}.docx`),
-          );
+        try {
+          await downloadReferral(v._id);
+        } catch {
+          setPendingReferralDownload(v._id);
+          showToast("Referral was saved, but the form could not be downloaded. Use Retry download.", "error");
+          setStatusTarget(null);
+          fetchQueue(false);
+          return;
         }
       }
+      showToast(res.message);
       setStatusTarget(null);
       fetchQueue(false);
     } catch (err: unknown) {
-      showToast(err instanceof Error ? err.message : "Failed to update visit status");
+      showToast(err instanceof Error ? err.message : "Failed to update visit status", "error");
+      throw err;
     }
   };
 
@@ -342,14 +415,13 @@ function PatientQueuePage({ embedded = false }: { embedded?: boolean }) {
   const openConsultation = async (visit: ClinicVisit) => {
     if (!visit.patientId || typeof visit.patientId !== "object") return;
     try {
-      if (visit.status !== "in_consultation") {
+      if (role === "doctor" && visit.status !== "in_consultation") {
         await api.put(`/visits/${visit._id}/status`, { status: "in_consultation" });
       }
       const params = new URLSearchParams({
         tab: "consultation",
         visitId: visit._id,
         patientId: visit.patientId._id,
-        complaint: visit.complaint,
       });
       if (visit.appointmentId) {
         params.set(
@@ -357,14 +429,40 @@ function PatientQueuePage({ embedded = false }: { embedded?: boolean }) {
           typeof visit.appointmentId === "object" ? visit.appointmentId._id : visit.appointmentId,
         );
       }
-      navigate(`/clinical-workspace?${params}`);
+      const destination = embedded
+        ? role === "doctor"
+          ? `/dashboard?${params}`
+          : `/dashboard?view=records&${params}`
+        : `/clinical-workspace?${params}`;
+      navigate(destination);
     } catch (err: unknown) {
-      showToast(err instanceof Error ? err.message : "Failed to start consultation");
+      showToast(err instanceof Error ? err.message : "Failed to start consultation", "error");
     }
   };
 
   const waitingCount = queue.filter((v) => !v.readyForDoctor).length;
   const readyCount = queue.filter((v) => v.status === "ready_for_doctor" || v.readyForDoctor).length;
+  const normalizedVisitSearch = visitSearch.trim().toLowerCase();
+  const filteredQueue = normalizedVisitSearch
+    ? queue.filter((visit) => {
+        const patient = visit.patientId && typeof visit.patientId === "object"
+          ? visit.patientId
+          : null;
+        return [
+          patient?.firstName,
+          patient?.lastName,
+          patient ? patientIdentifier(patient) : undefined,
+          patient ? patientTypeLabel(patient) : undefined,
+          visit.complaint,
+          visit.treatment,
+          visit.status?.replaceAll("_", " "),
+        ].some((value) => value?.toLowerCase().includes(normalizedVisitSearch));
+      })
+    : queue;
+  const vitalsPatientId = vitalsTarget?.patientId && typeof vitalsTarget.patientId === "object"
+    ? vitalsTarget.patientId._id
+    : vitalsTarget?.patientId;
+  const vitalsPatient = patients.find((patient) => patient._id === vitalsPatientId);
   const renderQueueActions = (v: ClinicVisit) => {
     if (!canManage) return null;
     return (
@@ -388,12 +486,17 @@ function PatientQueuePage({ embedded = false }: { embedded?: boolean }) {
             Ready for Doctor
           </button>
         )}
-        {v.readyForDoctor && v.status !== "in_consultation" && (
+        {role === "nurse" && v.status !== "in_consultation" && v.status !== "paused" && (
+          <button onClick={() => openConsultation(v)} className="text-xs text-blue-600 hover:underline">
+            Start Assessment
+          </button>
+        )}
+        {role === "doctor" && v.readyForDoctor && v.status !== "in_consultation" && (
           <button onClick={() => openConsultation(v)} className="text-xs text-blue-600 hover:underline">
             Start Consultation
           </button>
         )}
-        {v.status === "in_consultation" && (
+        {role === "doctor" && v.status === "in_consultation" && (
           <>
             <button onClick={() => openConsultation(v)} className="text-xs text-blue-600 hover:underline">Open Consultation</button>
             <button onClick={() => handleStatus(v, "paused")} className="text-xs text-amber-600 hover:underline">Pause</button>
@@ -401,7 +504,7 @@ function PatientQueuePage({ embedded = false }: { embedded?: boolean }) {
             <button onClick={() => openStatusWorkflow(v, "referred")} className="text-xs text-red-600 hover:underline">Refer</button>
           </>
         )}
-        {v.status === "paused" && (
+        {role === "doctor" && v.status === "paused" && (
           <>
             <button onClick={() => handleStatus(v, "in_consultation")} className="text-xs text-blue-600 hover:underline">Resume</button>
             <button onClick={() => openStatusWorkflow(v, "cancelled")} className="text-xs text-red-600 hover:underline">Cancel</button>
@@ -416,10 +519,10 @@ function PatientQueuePage({ embedded = false }: { embedded?: boolean }) {
       <div className="mb-2 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
           <h2 className="text-lg font-semibold text-slate-900">
-            {embedded ? "Student Visits" : "Student Queue"}
+            {embedded ? "Patient Visits" : "Patient Queue"}
           </h2>
           <p className="mt-0.5 text-sm text-slate-500">
-            Check in, triage, and move students through the clinic.
+            Check in, triage, and move patients through the clinic.
           </p>
         </div>
         {canCheckIn && (
@@ -438,19 +541,51 @@ function PatientQueuePage({ embedded = false }: { embedded?: boolean }) {
           : `${waitingCount} waiting for triage · ${readyCount} ready for doctor`}
       </p>
 
+      <div className="mb-4 flex flex-col gap-2 sm:flex-row">
+        <label className="sr-only" htmlFor="visit-patient-type">Filter visits by patient type</label>
+        <select
+          id="visit-patient-type"
+          value={patientTypeFilter}
+          onChange={(event) => setPatientTypeFilter(event.target.value as typeof patientTypeFilter)}
+          className="input sm:w-48"
+        >
+          <option value="all">All Patients</option>
+          <option value="student">Students</option>
+          <option value="teacher">Teachers</option>
+          <option value="staff">Staff</option>
+        </select>
+        <label htmlFor="visit-search" className="sr-only">Search patient visits</label>
+        <input
+          id="visit-search"
+          type="search"
+          value={visitSearch}
+          onChange={(event) => setVisitSearch(event.target.value)}
+          placeholder="Search patient name, ID, type, complaint, treatment, or status..."
+          className="input min-w-0 flex-1"
+        />
+      </div>
+
       {error && <p className="text-red-500 text-sm mb-3">{error}</p>}
+      {pendingReferralDownload && (
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
+          <span>The referral is saved, but its document still needs to be downloaded.</span>
+          <button type="button" onClick={retryReferralDownload} className="rounded bg-amber-700 px-3 py-2 font-medium text-white hover:bg-amber-800">
+            Retry download
+          </button>
+        </div>
+      )}
 
       {loading ? (
         <p className="text-gray-400 text-sm">Loading…</p>
       ) : (
         <>
           <div className="space-y-3 md:hidden">
-            {queue.length === 0 ? (
+            {filteredQueue.length === 0 ? (
               <div className="rounded-lg bg-white py-8 text-center text-sm text-gray-400 shadow">
-                Queue is empty.
+                {normalizedVisitSearch ? "No patient visits match your search." : "Queue is empty."}
               </div>
             ) : (
-              queue.map((v) => {
+              filteredQueue.map((v) => {
                 const link = patientLink(v.patientId);
                 return (
                   <article
@@ -468,9 +603,15 @@ function PatientQueuePage({ embedded = false }: { embedded?: boolean }) {
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0 font-medium">
                         {link ? (
-                          <Link to={link} className="break-words text-blue-600 hover:underline">
-                            {patientLabel(v.patientId)}
-                          </Link>
+                          embedded ? (
+                            <button type="button" onClick={() => setViewingPatientId(link.slice("/patients/".length))} className="break-words text-left text-blue-600 hover:underline">
+                              {patientLabel(v.patientId)}
+                            </button>
+                          ) : (
+                            <Link to={link} className="break-words text-blue-600 hover:underline">
+                              {patientLabel(v.patientId)}
+                            </Link>
+                          )
                         ) : patientLabel(v.patientId)}
                         {v.isEmergency && (
                           <span className="ml-2 inline-flex rounded-full bg-red-600 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white">
@@ -514,7 +655,7 @@ function PatientQueuePage({ embedded = false }: { embedded?: boolean }) {
           <table className="w-full min-w-[900px] text-sm">
             <thead className="border-b border-slate-200 bg-slate-50/80 text-left text-xs font-medium text-slate-500">
               <tr>
-                <th className="text-left px-4 py-3">Student</th>
+                <th className="text-left px-4 py-3">Patient</th>
                 <th className="text-left px-4 py-3">Arrived</th>
                 <th className="text-left px-4 py-3">Complaint</th>
                 <th className="text-left px-4 py-3">Vitals</th>
@@ -523,14 +664,14 @@ function PatientQueuePage({ embedded = false }: { embedded?: boolean }) {
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {queue.length === 0 ? (
+              {filteredQueue.length === 0 ? (
                 <tr>
                   <td colSpan={6} className="text-center py-6 text-gray-400">
-                    Queue is empty.
+                    {normalizedVisitSearch ? "No patient visits match your search." : "Queue is empty."}
                   </td>
                 </tr>
               ) : (
-                queue.map((v) => {
+                filteredQueue.map((v) => {
                   const link = patientLink(v.patientId);
                   return (
                     <tr
@@ -547,9 +688,15 @@ function PatientQueuePage({ embedded = false }: { embedded?: boolean }) {
                     >
                       <td className="px-4 py-3 font-medium">
                         {link ? (
-                          <Link to={link} className="text-blue-600 hover:underline">
-                            {patientLabel(v.patientId)}
-                          </Link>
+                          embedded ? (
+                            <button type="button" onClick={() => setViewingPatientId(link.slice("/patients/".length))} className="text-left text-blue-600 hover:underline">
+                              {patientLabel(v.patientId)}
+                            </button>
+                          ) : (
+                            <Link to={link} className="text-blue-600 hover:underline">
+                              {patientLabel(v.patientId)}
+                            </Link>
+                          )
                         ) : (
                           patientLabel(v.patientId)
                         )}
@@ -589,25 +736,21 @@ function PatientQueuePage({ embedded = false }: { embedded?: boolean }) {
       )}
 
       {showCheckIn && (
-        <Modal title="Check In Student" onClose={() => setShowCheckIn(false)} closeDisabled={checkingIn}>
+        <Modal title="Check In Patient" onClose={() => setShowCheckIn(false)} closeDisabled={checkingIn}>
           {checkInFormError && <p className="text-red-500 text-sm mb-3">{checkInFormError}</p>}
           <UnmatchedFieldErrors errors={unmatchedCheckInErrors(CHECKIN_FORM_FIELDS)} />
           <form onSubmit={handleCheckIn} className="flex flex-col gap-3">
             <div>
-              <label className="block text-xs text-gray-500 mb-1">Student *</label>
-              <select
+              <label className="block text-xs text-gray-500 mb-1">Patient *</label>
+              <p id="patient-picker-help" className="mb-2 text-xs text-gray-400">
+                Search by name or patient ID, then select a patient from the list.
+              </p>
+              <SearchablePatientSelect
+                patients={patients}
                 value={checkInForm.patientId}
-                onChange={(e) => ci("patientId", e.target.value)}
-                required
-                className={`input w-full ${checkInFieldErrors.patientId ? "input-error" : ""}`}
-              >
-                <option value="">Select a student…</option>
-                {patients.map((p) => (
-                  <option key={p._id} value={p._id}>
-                    {p.firstName} {p.lastName} ({p.studentId})
-                  </option>
-                ))}
-              </select>
+                onChange={(patientId) => ci("patientId", patientId)}
+                disabled={patientsLoading}
+              />
               <FieldError message={checkInFieldErrors.patientId} />
             </div>
             <div>
@@ -699,12 +842,21 @@ function PatientQueuePage({ embedded = false }: { embedded?: boolean }) {
       {vitalsTarget && (
         <Modal
           title={`${hasRecordedVitals(vitalsTarget) ? "Edit" : "Record"} Vitals: ${patientLabel(vitalsTarget.patientId)}`}
-          onClose={() => setVitalsTarget(null)}
+          onClose={closeVitals}
           closeDisabled={savingVitals}
         >
           {vitalsFormError && <p className="text-red-500 text-sm mb-3">{vitalsFormError}</p>}
           <UnmatchedFieldErrors errors={unmatchedVitalsErrors(VITALS_FORM_FIELDS)} />
           <form onSubmit={handleSaveVitals} className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            {vitalsPatient && (
+              <ClinicalProfileEditor
+                patient={vitalsPatient}
+                mode="nurse"
+                onSaved={(updatedPatient) => setPatients((current) =>
+                  current.map((patient) => patient._id === updatedPatient._id ? updatedPatient : patient)
+                )}
+              />
+            )}
             <div className="sm:col-span-2">
               <label className="block text-xs text-gray-500 mb-1">Complaint *</label>
               <input
@@ -784,6 +936,11 @@ function PatientQueuePage({ embedded = false }: { embedded?: boolean }) {
                 onChange={(e) => vf("heightCm", e.target.value)}
                 className={`input ${vitalsFieldErrors.heightCm ? "input-error" : ""}`}
               />
+              {prefilledHeightRecordedAt && (
+                <p className="mt-1 text-xs text-blue-700">
+                  Prefilled from {new Date(prefilledHeightRecordedAt).toLocaleDateString()}. Confirm or update it.
+                </p>
+              )}
               <FieldError message={vitalsFieldErrors.heightCm} />
             </div>
             <div>
@@ -797,8 +954,14 @@ function PatientQueuePage({ embedded = false }: { embedded?: boolean }) {
                 onChange={(e) => vf("weightKg", e.target.value)}
                 className={`input ${vitalsFieldErrors.weightKg ? "input-error" : ""}`}
               />
+              {prefilledWeightRecordedAt && (
+                <p className="mt-1 text-xs text-blue-700">
+                  Prefilled from {new Date(prefilledWeightRecordedAt).toLocaleDateString()}. Confirm or update it.
+                </p>
+              )}
               <FieldError message={vitalsFieldErrors.weightKg} />
             </div>
+            <BmiPreview heightCm={vitalsForm.heightCm} weightKg={vitalsForm.weightKg} age={vitalsPatient?.age} gender={vitalsPatient?.gender} dateOfBirth={vitalsPatient?.dateOfBirth} className="sm:col-span-2" />
             <div className="sm:col-span-2">
               <label className="block text-xs text-gray-500 mb-1">Notes</label>
               <textarea
@@ -812,7 +975,7 @@ function PatientQueuePage({ embedded = false }: { embedded?: boolean }) {
             <div className="flex flex-col-reverse gap-2 sm:col-span-2 sm:flex-row sm:justify-end">
               <button
                 type="button"
-                onClick={() => setVitalsTarget(null)}
+                onClick={closeVitals}
                 className="px-4 py-2 text-sm border rounded hover:bg-gray-50"
               >
                 Cancel
@@ -878,7 +1041,7 @@ function PatientQueuePage({ embedded = false }: { embedded?: boolean }) {
             )}
             {statusTarget.status === "completed" && (
               <label className="block text-xs font-medium text-gray-600">
-                Student disposition *
+                Patient disposition *
                 <select
                   value={statusForm.closureOutcome}
                   onChange={(event) => setStatusForm((current) => ({
@@ -915,6 +1078,10 @@ function PatientQueuePage({ embedded = false }: { embedded?: boolean }) {
           </form>
         </Modal>
       )}
+      <PatientRecordModal
+        patientId={viewingPatientId}
+        onClose={() => setViewingPatientId(null)}
+      />
     </PageFrame>
   );
 }

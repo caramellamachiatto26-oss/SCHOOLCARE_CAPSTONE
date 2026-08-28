@@ -6,6 +6,8 @@ import Modal from "../../components/Modal";
 import { useToast } from "../../hooks/useToast";
 import { FieldError, UnmatchedFieldErrors } from "../../components/FieldError";
 import type { ClinicVisit } from "../../utils/types";
+import { BmiPreview } from "../../components/BmiPreview";
+import { notifyClinicAnalyticsUpdated } from "../../utils/clinicEvents";
 
 const empty = {
   complaint: "",
@@ -27,11 +29,13 @@ const FORM_FIELDS = ["patientId", ...Object.keys(empty)];
 
 type Form = typeof empty;
 
-function PatientVisits({ patientId }: { patientId: string }) {
+function PatientVisits({ patientId, patientAge, patientGender, patientDateOfBirth }: { patientId: string; patientAge?: number; patientGender?: string; patientDateOfBirth?: string }) {
   const canEdit = getCurrentRole() === "nurse";
   const { showToast } = useToast();
 
   const [visits, setVisits] = useState<ClinicVisit[]>([]);
+  const [search, setSearch] = useState("");
+  const [submittedSearch, setSubmittedSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState("");
   const [editing, setEditing] = useState<ClinicVisit | null>(null);
@@ -41,18 +45,27 @@ function PatientVisits({ patientId }: { patientId: string }) {
   const { formError, fieldErrors, applyError, reset: resetFormErrors, clearField, unmatchedFieldErrors } =
     useFormErrors();
 
-  const reload = useCallback(() => {
+  const reload = useCallback((query = submittedSearch) => {
     setLoadError("");
-    return api.get<ClinicVisit[]>(`/visits/patient/${patientId}`)
+    const params = new URLSearchParams();
+    if (query) params.set("search", query);
+    return api.getAll<ClinicVisit>(`/visits/patient/${patientId}?${params}`)
       .then((response) => setVisits(response.data))
       .catch((error: unknown) => {
         setLoadError(error instanceof Error ? error.message : "Failed to load visit history");
       });
-  }, [patientId]);
+  }, [patientId, submittedSearch]);
 
   useEffect(() => {
     reload().finally(() => setLoading(false));
   }, [reload]);
+
+  const handleSearch = (event: React.FormEvent) => {
+    event.preventDefault();
+    const query = search.trim();
+    if (query === submittedSearch) void reload(query);
+    else setSubmittedSearch(query);
+  };
 
   const openCreate = () => { setEditing(null); setForm(empty); resetFormErrors(); setOpen(true); };
   const openEdit = (v: ClinicVisit) => {
@@ -100,6 +113,7 @@ function PatientVisits({ patientId }: { patientId: string }) {
       const res = editing
         ? await api.put(`/visits/${editing._id}`, body)
         : await api.post("/visits", body);
+      notifyClinicAnalyticsUpdated();
       showToast(res.message);
       setOpen(false);
       reload();
@@ -126,6 +140,29 @@ function PatientVisits({ patientId }: { patientId: string }) {
         )}
       </div>
 
+      <form onSubmit={handleSearch} className="mb-3 flex flex-col gap-2 sm:flex-row">
+        <input
+          type="search"
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          placeholder="Search complaint, treatment, notes, or status..."
+          aria-label="Search patient visit history"
+          className="input min-w-0 flex-1"
+        />
+        <button type="submit" className="rounded bg-slate-800 px-4 py-2 text-sm font-medium text-white hover:bg-slate-700">
+          Search
+        </button>
+        {submittedSearch && (
+          <button
+            type="button"
+            onClick={() => { setSearch(""); setSubmittedSearch(""); }}
+            className="rounded border px-4 py-2 text-sm text-slate-700 hover:bg-slate-50"
+          >
+            Clear
+          </button>
+        )}
+      </form>
+
       {loading ? (
         <p className="text-gray-400 text-sm">Loading…</p>
       ) : loadError ? (
@@ -146,7 +183,7 @@ function PatientVisits({ patientId }: { patientId: string }) {
             </thead>
             <tbody className="divide-y divide-gray-100">
               {visits.length === 0 ? (
-                <tr><td colSpan={5} className="text-center py-6 text-gray-400">No visits recorded.</td></tr>
+                <tr><td colSpan={5} className="text-center py-6 text-gray-400">{submittedSearch ? "No visits match your search." : "No visits recorded."}</td></tr>
               ) : (
                 visits.map((v) => (
                   <tr key={v._id} className="hover:bg-gray-50">
@@ -158,6 +195,7 @@ function PatientVisits({ patientId }: { patientId: string }) {
                         v.temperature && `${v.temperature}°C`,
                         v.bloodPressure && `BP: ${v.bloodPressure}`,
                         v.pulseRate && `PR: ${v.pulseRate}`,
+                        v.bmi != null && `BMI: ${v.bmi}`,
                       ].filter(Boolean).join(" · ") || "—"}
                     </td>
                     {canEdit && (
@@ -228,12 +266,13 @@ function PatientVisits({ patientId }: { patientId: string }) {
             </div>
             <div>
               <label className="block text-xs text-gray-500 mb-1">Height (cm)</label>
-              <input type="number" min={1} step="0.1" value={form.heightCm} onChange={(e) => f("heightCm", e.target.value)} className="input" />
+              <input type="number" min={30} max={250} step="0.1" value={form.heightCm} onChange={(e) => f("heightCm", e.target.value)} className="input" />
             </div>
             <div>
               <label className="block text-xs text-gray-500 mb-1">Weight (kg)</label>
-              <input type="number" min={1} step="0.1" value={form.weightKg} onChange={(e) => f("weightKg", e.target.value)} className="input" />
+              <input type="number" min={1} max={500} step="0.1" value={form.weightKg} onChange={(e) => f("weightKg", e.target.value)} className="input" />
             </div>
+            <BmiPreview heightCm={form.heightCm} weightKg={form.weightKg} age={patientAge} gender={patientGender} dateOfBirth={patientDateOfBirth} className="sm:col-span-2" />
             <div className="mt-1 border-t pt-3 sm:col-span-2">
               <p className="text-xs font-semibold text-sky-700 mb-2">Nursing Assessment — not a physician diagnosis</p>
               <label className="block text-xs text-gray-500 mb-1">Nursing Assessment</label>

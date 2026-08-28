@@ -1,4 +1,5 @@
 import type { Patient, ClinicVisit, MedicalHistory } from "../../utils/types";
+import { academicLevelLabel, educationLevelLabel, educationLevelOf, patientIdentifier, patientTypeLabel, patientTypeOf } from "../../utils/patient";
 
 interface Props {
   patient: Patient;
@@ -17,7 +18,7 @@ function PrintablePatientSummary({ patient, visits, history }: Props) {
       <div className="flex justify-between items-start border-b-2 border-black pb-3 mb-4">
         <div>
           <h1 className="text-xl font-bold">School Clinic System</h1>
-          <p className="text-sm">Student Clinic Summary</p>
+          <p className="text-sm">{patientTypeLabel(patient)} Clinic Summary</p>
         </div>
         <p className="text-xs text-right">Printed {generatedAt}</p>
       </div>
@@ -26,13 +27,38 @@ function PrintablePatientSummary({ patient, visits, history }: Props) {
         {patient.firstName} {patient.lastName}
       </h2>
       <div className="grid grid-cols-3 gap-3 text-sm mb-6">
-        <SummaryField label="Student ID" value={patient.studentId} />
+        <SummaryField label={patientTypeOf(patient) === "student" ? "Student ID" : "Employee ID"} value={patientIdentifier(patient)} />
         <SummaryField label="Age" value={String(patient.age)} />
         <SummaryField label="Gender" value={patient.gender} />
-        <SummaryField label="Course" value={patient.course} />
-        <SummaryField label="Year Level" value={String(patient.yearLevel)} />
+        {patientTypeOf(patient) === "student" ? <>
+          <SummaryField label="Education Level" value={educationLevelLabel(educationLevelOf(patient))} />
+          {educationLevelOf(patient) === "college" && <SummaryField label="Course" value={patient.course || "Not recorded"} />}
+          <SummaryField label={educationLevelOf(patient) === "college" ? "Year Level" : "Grade Level"} value={academicLevelLabel(patient)} />
+          {educationLevelOf(patient) === "college" && <SummaryField label="Program Length" value={`${patient.programDurationYears ?? 4} years`} />}
+        </> : <>
+          <SummaryField label="Department" value={patient.department || "Not recorded"} />
+          <SummaryField label="Position" value={patient.position || "Not recorded"} />
+        </>}
         <SummaryField label="Contact" value={patient.contactNumber} />
         <SummaryField label="Address" value={patient.address} className="col-span-3" />
+      </div>
+
+      <div className="mb-6">
+        <h3 className="text-sm font-bold uppercase border-b border-black pb-1 mb-2">Clinical Profile and Medical Alerts</h3>
+        <div className="grid grid-cols-2 gap-3 text-sm">
+          <SummaryField label="Allergies" value={patient.medicalAlerts?.allergies?.join(", ") || "None recorded"} />
+          <SummaryField label="Chronic Conditions" value={patient.medicalAlerts?.chronicConditions?.join(", ") || "None recorded"} />
+          <SummaryField label="Current Medications" value={patient.medicalAlerts?.currentMedications?.join(", ") || "None recorded"} />
+          <SummaryField label="Family History" value={patient.familyHistory || "None recorded"} />
+          <SummaryField label="Past Medical History" value={patient.pastMedicalHistory || patient.healthConditions || "None recorded"} className="col-span-2" />
+          <SummaryField
+            label="Clinical Profile Verification"
+            value={patient.clinicalProfileVerifiedAt
+              ? `Verified ${new Date(patient.clinicalProfileVerifiedAt).toLocaleDateString()}`
+              : "Awaiting doctor verification"}
+            className="col-span-2"
+          />
+        </div>
       </div>
 
       {latestVisit && (
@@ -92,8 +118,9 @@ function PrintablePatientSummary({ patient, visits, history }: Props) {
                 <th className="py-1 pr-2">Date</th>
                 <th className="py-1 pr-2">Diagnosis</th>
                 <th className="py-1 pr-2">Prescription</th>
-                <th className="py-1 pr-2">Dispensed</th>
+                <th className="py-1 pr-2">Medication / Status</th>
                 <th className="py-1 pr-2">Allergies</th>
+                <th className="py-1 pr-2">Family History</th>
               </tr>
             </thead>
             <tbody>
@@ -104,10 +131,11 @@ function PrintablePatientSummary({ patient, visits, history }: Props) {
                   <td className="py-1 pr-2">{h.prescription || "—"}</td>
                   <td className="py-1 pr-2">
                     {h.prescribedItems && h.prescribedItems.length > 0
-                      ? h.prescribedItems.map((item) => `${item.medicineName} × ${item.quantity} ${item.unit}`).join(", ")
+                      ? `${h.prescribedItems.map((item) => `${item.medicineName} × ${item.quantity} ${item.unit}`).join(", ")} (${h.medicationStatus || "pending"})`
                       : "—"}
                   </td>
                   <td className="py-1 pr-2">{h.allergies || "—"}</td>
+                  <td className="py-1 pr-2">{h.familyHistory || "—"}</td>
                 </tr>
               ))}
             </tbody>

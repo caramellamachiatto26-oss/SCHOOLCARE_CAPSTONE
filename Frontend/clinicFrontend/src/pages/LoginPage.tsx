@@ -1,24 +1,37 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { ApiError } from "../services/api";
+import { ApiError, readApiResponse } from "../services/api";
 import { useFormErrors } from "../hooks/useFormErrors";
 import { FieldError } from "../components/FieldError";
 import { BrandLogo } from "../components/BrandLogo";
+import { TermsAgreementModal } from "../components/TermsAgreementModal";
 import {
+  clearCurrentSession,
   getCurrentUser,
   restoreCurrentSession,
   saveCurrentSession,
 } from "../utils/auth";
 import type { UserRole } from "../config/permissions";
+import {
+  clearLoginCooldown,
+  getRemainingCooldownSeconds,
+  loadLoginCooldown,
+  saveLoginCooldown,
+} from "../utils/loginCooldown";
 
-interface LoginResponse {
-  success: boolean;
-  message: string;
-  data: {
-    user: { id: string; role: UserRole };
-    expiresAt: string;
-  };
+interface LoginData {
+  user: { id: string; role: UserRole; termsAccepted: boolean; mustChangePassword: boolean };
+  expiresAt: string;
+  requiresTermsAcceptance: boolean;
 }
+
+interface PendingTermsSession {
+  user: { id: string; role: UserRole; mustChangePassword: boolean };
+  expiresAt: string;
+}
+
+const destinationFor = (user: { mustChangePassword: boolean }) =>
+  user.mustChangePassword ? "/change-password" : "/dashboard";
 
 // LoginPage handles user authentication and token storage.
 function LoginPage() {
@@ -27,21 +40,30 @@ function LoginPage() {
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [restoring, setRestoring] = useState(true);
-  const [cooldownSeconds, setCooldownSeconds] = useState(0);
+  const [cooldownUntil, setCooldownUntil] = useState(loadLoginCooldown);
+  const [cooldownSeconds, setCooldownSeconds] = useState(() =>
+    getRemainingCooldownSeconds(loadLoginCooldown()),
+  );
+  const [pendingTerms, setPendingTerms] = useState<PendingTermsSession | null>(null);
+  const [termsBusy, setTermsBusy] = useState(false);
+  const [termsError, setTermsError] = useState("");
   const { formError, fieldErrors, applyError, reset: resetFormErrors, clearField } = useFormErrors();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
 
   useEffect(() => {
     if (getCurrentUser()) {
-      navigate("/dashboard", { replace: true });
+      navigate(destinationFor(getCurrentUser()!), { replace: true });
       return;
     }
     let cancelled = false;
     restoreCurrentSession().then((result) => {
       if (cancelled) return;
       if (result.status === "authenticated") {
-        navigate("/dashboard", { replace: true });
+        navigate(destinationFor(result.user), { replace: true });
+      } else if (result.status === "terms_required") {
+        setPendingTerms({ user: result.user, expiresAt: result.expiresAt });
+        setRestoring(false);
       } else {
         setRestoring(false);
       }
@@ -52,12 +74,21 @@ function LoginPage() {
   }, [navigate]);
 
   useEffect(() => {
-    if (cooldownSeconds <= 0) return;
-    const timer = window.setInterval(() => {
-      setCooldownSeconds((current) => Math.max(0, current - 1));
-    }, 1000);
+    if (cooldownUntil <= 0) return;
+
+    const updateCountdown = () => {
+      const remaining = getRemainingCooldownSeconds(cooldownUntil);
+      setCooldownSeconds(remaining);
+      if (remaining === 0) {
+        clearLoginCooldown();
+        setCooldownUntil(0);
+      }
+    };
+
+    updateCountdown();
+    const timer = window.setInterval(updateCountdown, 1000);
     return () => window.clearInterval(timer);
-  }, [cooldownSeconds]);
+  }, [cooldownUntil]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -66,34 +97,83 @@ function LoginPage() {
     resetFormErrors();
 
     try {
-      const data = await fetch("/api/auth/login", {
+      const response = await fetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
         body: JSON.stringify({ email, password }),
-      }).then(async (res) => {
-        const json = await res.json() as LoginResponse & {
-          errors?: { field: string; message: string }[];
-        };
-        if (!res.ok) {
-          if (res.status === 429) {
-            setCooldownSeconds(parseRetryAfter(res.headers.get("Retry-After")) ?? 120);
-          }
-          throw new ApiError(json.message || "Login failed", res.status, json.errors);
-        }
-        return json;
+      });
+      if (response.status === 429) {
+        const retryAfter = parseRetryAfter(response.headers.get("Retry-After")) ?? 120;
+        const nextCooldownUntil = saveLoginCooldown(retryAfter);
+        setCooldownUntil(nextCooldownUntil);
+        setCooldownSeconds(getRemainingCooldownSeconds(nextCooldownUntil));
+      }
+      const data = await readApiResponse<LoginData>(response, {
+        treatUnauthorizedAsSessionExpiry: false,
       });
 
-      saveCurrentSession(data.data.user, data.data.expiresAt);
-      navigate("/dashboard");
+      if (data.data.requiresTermsAcceptance || !data.data.user.termsAccepted) {
+        clearCurrentSession();
+        setPendingTerms({ user: data.data.user, expiresAt: data.data.expiresAt });
+      } else {
+        saveCurrentSession(data.data.user, data.data.expiresAt);
+        navigate(destinationFor(data.data.user));
+      }
     } catch (err: unknown) {
-      applyError(err, "Login failed");
+      applyError(
+        err instanceof ApiError
+          ? err
+          : new ApiError("Cannot connect to the clinic service. Make sure the backend is running and try again.", 503),
+        "Login failed",
+      );
     } finally {
       setLoading(false);
     }
   };
 
+  const handleAcceptTerms = async () => {
+    if (!pendingTerms || termsBusy) return;
+    setTermsBusy(true);
+    setTermsError("");
+
+    try {
+      const response = await fetch("/api/auth/terms/accept", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+      });
+      await readApiResponse<unknown>(response);
+
+      saveCurrentSession(pendingTerms.user, pendingTerms.expiresAt);
+      navigate(destinationFor(pendingTerms.user), { replace: true });
+    } catch (error) {
+      setTermsError(
+        error instanceof ApiError
+          ? error.message
+          : "Cannot connect to the clinic service. Make sure the backend is running and try again.",
+      );
+    } finally {
+      setTermsBusy(false);
+    }
+  };
+
+  const handleDeclineTerms = async () => {
+    if (termsBusy) return;
+    setTermsBusy(true);
+    try {
+      await fetch("/api/auth/logout", { method: "POST", credentials: "include" });
+    } finally {
+      clearCurrentSession();
+      setPendingTerms(null);
+      setPassword("");
+      setTermsBusy(false);
+      navigate("/login", { replace: true });
+    }
+  };
+
   return (
+    <>
     <div className="landing-hero relative min-h-screen overflow-hidden px-5 py-7 sm:px-8 lg:px-12">
       <div className="landing-orb -left-28 top-24 h-80 w-80 bg-blue-400/30" />
       <div className="landing-orb -right-20 bottom-0 h-96 w-96 bg-indigo-300/25" />
@@ -160,6 +240,9 @@ function LoginPage() {
                     <span aria-hidden="true">!</span>
                     <p>Your session ended. Sign in again to continue.</p>
                   </div>
+                )}
+                {searchParams.get("reason") === "password-changed" && (
+                  <div className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">Password changed successfully. Sign in with your new password.</div>
                 )}
 
                 {formError && (
@@ -247,6 +330,15 @@ function LoginPage() {
         </div>
       </main>
     </div>
+    {pendingTerms && (
+      <TermsAgreementModal
+        busy={termsBusy}
+        error={termsError}
+        onAccept={handleAcceptTerms}
+        onDecline={handleDeclineTerms}
+      />
+    )}
+    </>
   );
 }
 

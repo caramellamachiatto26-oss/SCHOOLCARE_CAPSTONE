@@ -27,6 +27,8 @@ describe("auth utils", () => {
     expect(getCurrentUser()).toEqual({
       id: "abc123",
       role: "nurse",
+      mustChangePassword: false,
+      termsAccepted: true,
       exp: expect.any(Number),
     });
     expect(getCurrentRole()).toBe("nurse");
@@ -49,7 +51,7 @@ describe("auth utils", () => {
   it("rejects cached sessions with an invalid role", () => {
     sessionStorage.setItem("clinic_session", JSON.stringify({
       id: "abc123",
-      role: "superadmin",
+      role: "owner",
       exp: Math.floor(Date.now() / 1000) + 3600,
     }));
 
@@ -66,6 +68,7 @@ describe("auth utils", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
       data: {
         user: { id: "doctor-1", role: "doctor" },
+        termsAccepted: true,
         expiresAt: new Date(Date.now() + 60_000).toISOString(),
       },
     }), {
@@ -78,6 +81,43 @@ describe("auth utils", () => {
     expect(result).toEqual(expect.objectContaining({ status: "authenticated" }));
     expect(getCurrentRole()).toBe("doctor");
     expect(localStorage.getItem("token")).toBeNull();
+  });
+
+  it("preserves the mandatory password-change flag", () => {
+    saveCurrentSession(
+      { id: "temporary-1", role: "staff", mustChangePassword: true },
+      new Date(Date.now() + 60_000).toISOString(),
+    );
+    expect(getCurrentUser()?.mustChangePassword).toBe(true);
+  });
+
+  it("reports a valid session that still requires Terms acceptance", async () => {
+    const expiresAt = new Date(Date.now() + 60_000).toISOString();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      data: {
+        user: { id: "staff-1", role: "staff" },
+        termsAccepted: false,
+        expiresAt,
+      },
+    }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })));
+
+    await expect(restoreCurrentSession()).resolves.toEqual({
+      status: "terms_required",
+      user: { id: "staff-1", role: "staff", mustChangePassword: false },
+      expiresAt,
+    });
+    expect(getCurrentUser()).toBeNull();
+  });
+
+  it("accepts Super Admin session metadata", () => {
+    saveCurrentSession(
+      { id: "super-1", role: "superadmin" },
+      new Date(Date.now() + 60_000).toISOString(),
+    );
+    expect(getCurrentRole()).toBe("superadmin");
   });
 
   it("distinguishes a service outage from an expired session", async () => {

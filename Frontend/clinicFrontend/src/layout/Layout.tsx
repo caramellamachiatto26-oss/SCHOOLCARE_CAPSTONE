@@ -8,6 +8,9 @@ import { api } from "../services/api";
 import type { ClinicVisit, User } from "../utils/types";
 import { clearCurrentSession } from "../utils/auth";
 import { BrandLogo } from "../components/BrandLogo";
+import { TermsAgreementModal } from "../components/TermsAgreementModal";
+import Modal from "../components/Modal";
+import { useInAppNotifications } from "../features/notifications/useInAppNotifications";
 import {
   AuditIcon,
   CalendarIcon,
@@ -17,9 +20,11 @@ import {
   MenuIcon,
   MedicineIcon,
   PatientsIcon,
+  ProfileIcon,
   ReportsIcon,
   SearchIcon,
   StaffIcon,
+  SettingsIcon,
   VisitsIcon,
 } from "../components/icons";
 
@@ -32,9 +37,11 @@ const NAV_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
   "/medicines": MedicineIcon,
   "/purchase-requests": CartIcon,
   "/users": StaffIcon,
+  "/roles-permissions": AuditIcon,
   "/reports": ReportsIcon,
   "/audit-log": AuditIcon,
-  "/settings": StaffIcon,
+  "/settings": SettingsIcon,
+  "/profile": ProfileIcon,
 };
 
 const EMERGENCY_POLL_INTERVAL_MS = 10_000;
@@ -50,7 +57,7 @@ function Layout({ children }: { children: React.ReactNode }) {
   const location = useLocation();
   const { role } = useAuth();
   const { showToast } = useToast();
-  const hasSidebar = role === "admin";
+  const hasSidebar = role === "admin" || role === "superadmin";
   const minutesLeft = useSessionExpiryWarning();
   const [search, setSearch] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -59,6 +66,15 @@ function Layout({ children }: { children: React.ReactNode }) {
   const [online, setOnline] = useState(() => navigator.onLine);
   const [emergencyVisits, setEmergencyVisits] = useState<ClinicVisit[]>([]);
   const [openingEmergency, setOpeningEmergency] = useState(false);
+  const [reviewingTerms, setReviewingTerms] = useState(false);
+  const [snoozedMedicationIds, setSnoozedMedicationIds] = useState<string[]>([]);
+  const nurseNotifications = useInAppNotifications(role === "nurse");
+  const pendingMedicationOrder = nurseNotifications.items.find(
+    (notification) =>
+      notification.kind === "medication_order" &&
+      !notification.readAt &&
+      !snoozedMedicationIds.includes(notification._id),
+  );
 
   useEffect(() => {
     api.get<User>("/users/me").then((response) => setProfile(response.data)).catch(() => {});
@@ -104,15 +120,19 @@ function Layout({ children }: { children: React.ReactNode }) {
   const visibleItems = NAV_ITEMS.filter((item) => {
     if (!role || !item.roles.includes(role)) return false;
     if (role === "admin") {
-      return item.to === "/dashboard" || item.to === "/audit-log";
+      return ["/dashboard", "/audit-log", "/settings", "/profile"].includes(item.to);
     }
     return true;
   });
   const canSearchStudents = can(role, "searchPatients") && role !== "doctor";
   const isClinicalRole = role === "doctor" || role === "nurse";
+  const dashboardView = new URLSearchParams(location.search).get("view");
+  const isPatientQueueVisible =
+    location.pathname === "/patient-queue" ||
+    (location.pathname === "/dashboard" && dashboardView === "visits");
 
   useEffect(() => {
-    if (!isClinicalRole) {
+    if (!isClinicalRole || isPatientQueueVisible) {
       setEmergencyVisits([]);
       return;
     }
@@ -151,7 +171,7 @@ function Layout({ children }: { children: React.ReactNode }) {
       window.clearInterval(interval);
       document.removeEventListener("visibilitychange", refreshWhenVisible);
     };
-  }, [isClinicalRole, showToast]);
+  }, [isClinicalRole, isPatientQueueVisible, showToast]);
 
   useEffect(() => {
     if (emergencyVisits.length === 0) return;
@@ -186,7 +206,6 @@ function Layout({ children }: { children: React.ReactNode }) {
         tab: "consultation",
         visitId: visit._id,
         patientId: visit.patientId._id,
-        complaint: visit.complaint,
       });
       if (visit.appointmentId) {
         params.set(
@@ -196,7 +215,7 @@ function Layout({ children }: { children: React.ReactNode }) {
             : visit.appointmentId,
         );
       }
-      navigate(`/clinical-workspace?${params}`);
+      navigate(`/dashboard?${params}`);
     } catch (error: unknown) {
       showToast(
         error instanceof Error ? error.message : "Failed to open the emergency consultation",
@@ -207,14 +226,45 @@ function Layout({ children }: { children: React.ReactNode }) {
     }
   };
 
+  const snoozeMedicationOrder = () => {
+    if (!pendingMedicationOrder) return;
+    const notificationId = pendingMedicationOrder._id;
+    setSnoozedMedicationIds((current) => [...new Set([...current, notificationId])]);
+    window.setTimeout(() => {
+      setSnoozedMedicationIds((current) => current.filter((id) => id !== notificationId));
+    }, 5 * 60_000);
+  };
+
+  const openMedicationOrder = () => {
+    if (!pendingMedicationOrder) return;
+    snoozeMedicationOrder();
+    navigate("/dashboard?view=medications");
+  };
+
   const clinicalTabs = [
     { id: "appointments", label: "Today's Appointments", icon: CalendarIcon },
-    { id: "records", label: "Student Records", icon: PatientsIcon },
-    { id: "consultation", label: "New Consultation", icon: VisitsIcon },
+    { id: "records", label: "Patient Records", icon: PatientsIcon },
     { id: "followups", label: "Follow-Ups", icon: CalendarIcon },
   ] as const;
 
   const closeSidebar = () => setSidebarOpen(false);
+
+  useEffect(() => {
+    setSidebarOpen(false);
+  }, [location.pathname, location.search]);
+
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }, [location.pathname]);
+
+  useEffect(() => {
+    if (!sidebarOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSidebarOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [sidebarOpen]);
 
   const navigation = (
     <nav aria-label="Main navigation" className="space-y-1 p-4">
@@ -290,6 +340,12 @@ function Layout({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="min-h-screen bg-gray-50 print:bg-white">
+      <a
+        href="#main-content"
+        className="fixed left-3 top-3 z-[70] -translate-y-20 rounded-lg bg-slate-950 px-4 py-2 text-sm font-semibold text-white focus:translate-y-0"
+      >
+        Skip to main content
+      </a>
       <header className="border-b border-gray-200 bg-white print:hidden">
         <div className="mx-auto flex max-w-[1600px] flex-wrap items-center gap-3 px-3 py-3 sm:px-6">
           {hasSidebar && (
@@ -297,6 +353,8 @@ function Layout({ children }: { children: React.ReactNode }) {
               type="button"
               onClick={() => setSidebarOpen(true)}
               aria-label="Open navigation"
+              aria-controls="mobile-navigation"
+              aria-expanded={sidebarOpen}
               className="rounded-lg border border-gray-200 p-2 text-gray-600 hover:bg-gray-50 lg:hidden"
             >
               <MenuIcon />
@@ -310,9 +368,8 @@ function Layout({ children }: { children: React.ReactNode }) {
             <BrandLogo className="h-10 w-10 drop-shadow-[0_5px_8px_rgba(37,99,235,0.18)]" />
             <span className="leading-tight">
               <span className="block text-sm font-bold text-gray-900 sm:text-base">
-                School Clinic Management
+                Basic Clinic
               </span>
-              <span className="block text-xs capitalize text-gray-500">{role} dashboard</span>
             </span>
           </button>
 
@@ -325,12 +382,12 @@ function Layout({ children }: { children: React.ReactNode }) {
                 type="search"
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
-                placeholder="Search students..."
+                placeholder="Search patients..."
                 className="input pr-9"
               />
               <button
                 type="submit"
-                aria-label="Search students"
+                aria-label="Search patients"
                 className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-blue-600"
               >
                 <SearchIcon />
@@ -365,7 +422,7 @@ function Layout({ children }: { children: React.ReactNode }) {
             onClick={closeSidebar}
             className="absolute inset-0 bg-slate-950/40"
           />
-          <aside className="relative h-full w-[min(85vw,300px)] overflow-y-auto border-r border-gray-200 bg-white shadow-xl">
+          <aside id="mobile-navigation" className="relative h-full w-[min(85vw,300px)] overflow-y-auto border-r border-gray-200 bg-white shadow-xl">
             <div className="flex items-center justify-between border-b px-5 py-4">
               <div>
                 <p className="font-semibold text-gray-900">School Clinic</p>
@@ -392,7 +449,7 @@ function Layout({ children }: { children: React.ReactNode }) {
           </aside>
         )}
 
-        <main className="min-w-0 flex-1 p-3 sm:p-6 print:max-w-none print:p-0">
+        <main id="main-content" tabIndex={-1} className="min-w-0 flex-1 p-3 sm:p-6 print:max-w-none print:p-0">
           {emergencyVisits.length > 0 && (
             <div
               role="alert"
@@ -456,8 +513,56 @@ function Layout({ children }: { children: React.ReactNode }) {
             </div>
           )}
           {children}
+          <footer className="mt-8 flex flex-col gap-2 border-t border-gray-200 pt-4 text-xs text-gray-500 sm:flex-row sm:items-center sm:justify-between print:hidden">
+            <span>✓ You have read and accepted the Terms and Agreement.</span>
+            <button type="button" onClick={() => setReviewingTerms(true)} className="self-start font-medium text-blue-600 hover:underline sm:self-auto">
+              View Terms Again
+            </button>
+          </footer>
         </main>
       </div>
+      {reviewingTerms && (
+        <TermsAgreementModal
+          busy={false}
+          error=""
+          reviewOnly
+          onAccept={() => setReviewingTerms(false)}
+          onDecline={() => setReviewingTerms(false)}
+        />
+      )}
+      {pendingMedicationOrder && (
+        <Modal
+          title={pendingMedicationOrder.title}
+          onClose={snoozeMedicationOrder}
+        >
+          <div className="space-y-4">
+            <div className="rounded-lg border border-blue-200 bg-blue-50 p-4">
+              <p className="text-sm font-medium leading-6 text-blue-950">
+                {pendingMedicationOrder.message}
+              </p>
+            </div>
+            <p className="text-xs leading-5 text-gray-500">
+              Open the medication queue to review the student record and safety alerts, accept the request, and complete the required administration checklist.
+            </p>
+            <div className="flex flex-col-reverse gap-2 sm:flex-row sm:flex-wrap sm:justify-end">
+              <button
+                type="button"
+                onClick={snoozeMedicationOrder}
+                className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Remind Me Later
+              </button>
+              <button
+                type="button"
+                onClick={openMedicationOrder}
+                className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-medium text-white hover:bg-blue-700"
+              >
+                Open Medication Queue
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
