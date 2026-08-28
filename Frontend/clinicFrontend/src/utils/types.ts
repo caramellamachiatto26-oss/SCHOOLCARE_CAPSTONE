@@ -2,13 +2,19 @@
 
 export interface Patient {
   _id: string;
+  patientType?: "student" | "teacher" | "staff";
+  educationLevel?: "elementary" | "junior_high" | "senior_high" | "college";
   studentId: string;
+  employeeId?: string;
   firstName: string;
   lastName: string;
   age: number;
   gender: string;
-  course: string;
+  course?: string;
   yearLevel: number;
+  programDurationYears?: number;
+  department?: string;
+  position?: string;
   contactNumber: string;
   email?: string;
   address: string;
@@ -16,22 +22,26 @@ export interface Patient {
   bloodType?: string;
   guardianName?: string;
   guardianContactNumber?: string;
+  emergencyContactName?: string;
+  emergencyContactNumber?: string;
   healthConditions?: string;
+  familyHistory?: string;
+  pastMedicalHistory?: string;
   medicalAlerts?: {
     allergies?: string[];
     chronicConditions?: string[];
     currentMedications?: string[];
     notes?: string;
   };
-  consents?: {
-    treatment: boolean;
-    medicineAdministration: boolean;
-    dataPrivacy: boolean;
-    guardianName?: string;
-    updatedAt?: string;
-  };
+  clinicalProfileUpdatedBy?: { _id: string; name: string; role: string } | string;
+  clinicalProfileVerifiedBy?: { _id: string; name: string; role: string } | string;
+  clinicalProfileVerifiedAt?: string;
   schoolYear?: string;
-  enrollmentStatus?: "active" | "graduated" | "transferred";
+  enrollmentStatus?: "active" | "completion_pending" | "extended" | "graduated" | "transferred";
+  completionReviewDecision?: "graduated" | "retained" | "extended" | "transferred";
+  completionReviewNotes?: string;
+  completionReviewedAt?: string;
+  completionReviewedBy?: string;
   immunizations?: { vaccine: string; dateAdministered?: string; notes?: string }[];
   isActive: boolean;
 }
@@ -69,6 +79,13 @@ export interface ClinicVisit {
   isActive: boolean;
 }
 
+export interface LatestPatientVitals {
+  heightCm?: number;
+  heightRecordedAt?: string;
+  weightKg?: number;
+  weightRecordedAt?: string;
+}
+
 export interface Doctor {
   _id: string;
   name: string;
@@ -84,7 +101,8 @@ export interface Appointment {
   appointmentDate: string;
   reason: string;
   cancellationReason?: string;
-  status: "pending" | "confirmed" | "checked_in" | "cancelled" | "completed";
+  declineReason?: string;
+  status: "unassigned" | "pending" | "confirmed" | "needs_reassignment" | "checked_in" | "cancelled" | "completed";
   notes: string;
   reminderSent?: boolean;
   durationMinutes?: number;
@@ -100,6 +118,7 @@ export interface Medicine {
   _id: string;
   name: string;
   category?: string;
+  inventorySection?: string;
   quantity: number;
   unit: string;
   expiryDate?: string;
@@ -116,8 +135,11 @@ export interface User {
   _id: string;
   name: string;
   email: string;
-  role: "admin" | "doctor" | "nurse" | "staff";
+  role: "superadmin" | "admin" | "doctor" | "nurse" | "staff";
   isActive: boolean;
+  mustChangePassword?: boolean;
+  deactivatedAt?: string;
+  deactivatedBy?: string | { _id: string; name: string; email?: string; role?: string };
   isAvailable?: boolean;
   scheduleNotes?: string;
 }
@@ -128,6 +150,8 @@ export interface PrescribedItem {
   quantity: number;
   unit: string;
   instructions?: string;
+  route?: string;
+  scheduledTime?: string;
 }
 
 export interface MedicalHistory {
@@ -136,6 +160,16 @@ export interface MedicalHistory {
   diagnosis: string;
   prescription: string;
   prescribedItems?: PrescribedItem[];
+  medicationStatus?: "pending" | "accepted" | "dispensing" | "dispensed" | "not_given" | "cancelled";
+  medicationClaimedBy?: { _id: string; name: string; role: string } | string;
+  medicationClaimedAt?: string;
+  medicationDispensedBy?: { _id: string; name: string; role: string } | string;
+  medicationDispensedAt?: string;
+  medicationAdministrationNotes?: string;
+  medicationNotGivenReason?: string;
+  medicationNotGivenNotes?: string;
+  medicationAdverseReaction?: string;
+  medicationAdverseReactionAt?: string;
   familyHistory: string;
   allergies: string;
   dateRecorded: string;
@@ -150,6 +184,7 @@ export interface PurchaseRequest {
   itemName: string;
   unit?: string;
   category?: string;
+  inventorySection?: string;
   quantityRequested: number;
   reason: string;
   status: PurchaseRequestStatus;
@@ -178,11 +213,18 @@ export interface AuditLog {
     email: string;
     role: string;
   };
+  changes?: {
+    before?: Record<string, unknown>;
+    after?: Record<string, unknown>;
+  };
+  metadata?: { method?: string; path?: string };
   createdAt: string;
 }
 
 export interface DashboardStats {
   totalStudents: number;
+  totalPatients: number;
+  patientsByType: { student: number; teacher: number; staff: number };
   usersByRole: { doctor: number; nurse: number; staff: number; admin: number };
   todaysAppointments: number;
   todayVisits: number;
@@ -204,10 +246,15 @@ export interface DashboardStats {
   }[];
   commonComplaints: { label: string; count: number }[];
   monthlyVisits: { key: string; month: string; visits: number }[];
+  analyticsPatientType: "all" | "student" | "teacher" | "staff";
+  analyticsTotalVisits: number;
+  analyticsVisitBreakdown: { student: number; teacher: number; staff: number };
+  bmiRecordedCount: number;
+  bmiBreakdown: { underweight: number; normalWeight: number; overweight: number; obese: number };
   recentCases: {
     id: string;
     date: string;
-    student: { id: string; name: string; studentId: string } | null;
+    student: { id: string; name: string; studentId: string; patientType: "student" | "teacher" | "staff" } | null;
     complaint: string;
     assessment: string;
     treatment: string;
@@ -224,11 +271,73 @@ export interface DashboardStats {
 
 export interface SystemSettings {
   schoolYear: string;
+  clinicName: string;
+  buildingLocation: string;
+  floorRoom: string;
+  operatingDays: string;
   clinicOpenTime: string;
   clinicCloseTime: string;
+  weeklySchedule: ClinicScheduleDay[];
+  phoneNumber: string;
+  emailAddress: string;
   emailNotificationsEnabled: boolean;
   appointmentRemindersEnabled: boolean;
   stockAlertsEnabled: boolean;
+}
+
+export interface ClinicScheduleDay {
+  day: "Monday" | "Tuesday" | "Wednesday" | "Thursday" | "Friday" | "Saturday" | "Sunday";
+  openTime: string;
+  closeTime: string;
+}
+
+export type ClinicProfile = Pick<SystemSettings,
+  "clinicName" | "buildingLocation" | "floorRoom" | "operatingDays" |
+  "clinicOpenTime" | "clinicCloseTime" | "weeklySchedule" | "phoneNumber" | "emailAddress"
+>;
+
+export interface InventoryLabel {
+  _id: string;
+  name: string;
+  description?: string;
+  color: string;
+  sortOrder: number;
+  isActive: boolean;
+  isSystem: boolean;
+  itemCount: number;
+}
+
+export interface MedicationInventoryReportRow {
+  name: string;
+  inventorySection: string;
+  dateReceived?: string | null;
+  totalPrescribed: number;
+  remainingStock: number;
+  unit: string;
+  expirationDate?: string | null;
+  remarks: string;
+}
+
+export interface InventoryLabelActivity {
+  _id: string;
+  action: string;
+  resource: string;
+  resourceId: string;
+  actorSnapshot?: { name?: string; role?: string };
+  changes?: { before?: Record<string, unknown>; after?: Record<string, unknown> };
+  createdAt: string;
+}
+
+export interface InAppNotification {
+  _id: string;
+  kind: "appointment_assigned" | "appointment_reassigned" | "appointment_rescheduled" | "appointment_cancelled" | "visit_ready" | "emergency" | "medication_order";
+  title: string;
+  message: string;
+  link: string;
+  resourceType: "Appointment" | "ClinicVisit" | "MedicalHistory";
+  resourceId: string;
+  readAt?: string;
+  createdAt: string;
 }
 
 export interface InventoryBatch {

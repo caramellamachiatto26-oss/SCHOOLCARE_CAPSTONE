@@ -1,37 +1,46 @@
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import Layout from "../layout/Layout";
+import PageFrame from "../components/PageFrame";
 import Modal from "../components/Modal";
-import AdminSectionTabs from "../components/AdminSectionTabs";
 import { MedicineIcon, ReportsIcon, VisitsIcon } from "../components/icons";
 import { api } from "../services/api";
 import { useAuth } from "../hooks/useAuth";
 import { useFormErrors } from "../hooks/useFormErrors";
 import { useToast } from "../hooks/useToast";
 import { FieldError, UnmatchedFieldErrors } from "../components/FieldError";
-import type { Medicine } from "../utils/types";
-import type { ReactNode } from "react";
+import type { InventoryLabel, Medicine } from "../utils/types";
+import {
+  groupInventoryBySection,
+  inventorySectionLabel,
+} from "../features/inventory/inventorySections";
+import InventorySectionSelector from "../features/inventory/InventorySectionSelector";
 
 type InventoryFilter = "all" | "low" | "expiring" | "expired";
 
 const FORM_FIELDS = [
   "name",
   "category",
+  "inventorySection",
   "quantity",
   "unit",
   "expiryDate",
   "lowStockThreshold",
   "supplier",
+  "batchNumber",
+  "dateReceived",
 ];
 
 const emptyForm = {
   name: "",
   category: "",
+  inventorySection: "",
   quantity: "",
   unit: "",
   expiryDate: "",
   lowStockThreshold: "10",
   supplier: "",
+  batchNumber: "",
+  dateReceived: new Date().toISOString().slice(0, 10),
 };
 
 const emptyBatchForm = {
@@ -42,16 +51,13 @@ const emptyBatchForm = {
   notes: "",
 };
 
-function PageFrame({ embedded, children }: { embedded: boolean; children: ReactNode }) {
-  return embedded ? <>{children}</> : <Layout>{children}</Layout>;
-}
-
 function MedicinesPage({ embedded = false }: { embedded?: boolean }) {
-  const { can, role } = useAuth();
+  const { can } = useAuth();
   const { showToast } = useToast();
   const canEdit = can("editMedicines");
   const [referenceTime] = useState(() => new Date());
   const [medicines, setMedicines] = useState<Medicine[]>([]);
+  const [inventoryLabels, setInventoryLabels] = useState<InventoryLabel[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [search, setSearch] = useState("");
@@ -76,8 +82,9 @@ function MedicinesPage({ embedded = false }: { embedded?: boolean }) {
     setLoading(true);
     setError("");
     try {
-      const response = await api.get<Medicine[]>("/medicines?limit=200");
+      const response = await api.getAll<Medicine>("/medicines");
       setMedicines(response.data);
+      api.get<InventoryLabel[]>("/inventory-labels").then((result) => setInventoryLabels(result.data)).catch(() => {});
     } catch (requestError: unknown) {
       setError(requestError instanceof Error ? requestError.message : "Failed to load inventory");
     } finally {
@@ -88,7 +95,7 @@ function MedicinesPage({ embedded = false }: { embedded?: boolean }) {
   useEffect(() => {
     let cancelled = false;
     api
-      .get<Medicine[]>("/medicines?limit=200")
+      .getAll<Medicine>("/medicines")
       .then((response) => {
         if (!cancelled) setMedicines(response.data);
       })
@@ -100,6 +107,9 @@ function MedicinesPage({ embedded = false }: { embedded?: boolean }) {
       .finally(() => {
         if (!cancelled) setLoading(false);
       });
+    api.get<InventoryLabel[]>("/inventory-labels").then((result) => {
+      if (!cancelled) setInventoryLabels(result.data);
+    }).catch(() => {});
 
     return () => {
       cancelled = true;
@@ -131,7 +141,7 @@ function MedicinesPage({ embedded = false }: { embedded?: boolean }) {
     const query = search.trim().toLowerCase();
     return medicines.filter((medicine) => {
       const matchesSearch = !query ||
-        `${medicine.name} ${medicine.category ?? ""} ${medicine.supplier ?? ""}`
+        `${medicine.name} ${medicine.category ?? ""} ${medicine.inventorySection ?? ""} ${medicine.supplier ?? ""}`
           .toLowerCase()
           .includes(query);
       const matchesFilter =
@@ -144,6 +154,12 @@ function MedicinesPage({ embedded = false }: { embedded?: boolean }) {
   // Status helpers use the stable page-load reference time.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filter, medicines, referenceTime, search]);
+
+  const medicineGroups = useMemo(
+    () => groupInventoryBySection(filteredMedicines),
+    [filteredMedicines],
+  );
+  const labelDetails = (name: string) => inventoryLabels.find((label) => label.name === name);
 
   const lowStockItems = medicines.filter(isLowStock);
 
@@ -159,11 +175,14 @@ function MedicinesPage({ embedded = false }: { embedded?: boolean }) {
     setForm({
       name: medicine.name,
       category: medicine.category ?? "",
+      inventorySection: medicine.inventorySection ?? "",
       quantity: String(medicine.quantity),
       unit: medicine.unit,
       expiryDate: medicine.expiryDate?.slice(0, 10) ?? "",
       lowStockThreshold: String(medicine.lowStockThreshold),
       supplier: medicine.supplier ?? "",
+      batchNumber: "",
+      dateReceived: medicine.dateReceived?.slice(0, 10) ?? "",
     });
     resetFormErrors();
     setShowModal(true);
@@ -181,11 +200,16 @@ function MedicinesPage({ embedded = false }: { embedded?: boolean }) {
     const payload = {
       name: form.name,
       category: form.category || undefined,
-      quantity: Number(form.quantity),
+      inventorySection: form.inventorySection || undefined,
       unit: form.unit,
-      expiryDate: form.expiryDate || undefined,
       lowStockThreshold: Number(form.lowStockThreshold),
       supplier: form.supplier || undefined,
+      ...(!editTarget ? {
+        quantity: Number(form.quantity),
+        expiryDate: form.expiryDate || undefined,
+        batchNumber: form.batchNumber,
+        dateReceived: form.dateReceived,
+      } : {}),
     };
 
     try {
@@ -226,7 +250,7 @@ function MedicinesPage({ embedded = false }: { embedded?: boolean }) {
       setBatchTarget(null);
       await fetchInventory();
     } catch (requestError: unknown) {
-      showToast(requestError instanceof Error ? requestError.message : "Failed to receive stock");
+      showToast(requestError instanceof Error ? requestError.message : "Failed to receive stock", "error");
     } finally {
       setReceiving(false);
     }
@@ -235,8 +259,6 @@ function MedicinesPage({ embedded = false }: { embedded?: boolean }) {
   return (
     <PageFrame embedded={embedded}>
       <div className="mx-auto max-w-[1600px] space-y-5">
-        {role === "admin" && !embedded && <AdminSectionTabs active="inventory" />}
-
         <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div>
             {!embedded && <p className="text-sm text-gray-500">Medicine stock and supplies</p>}
@@ -250,21 +272,19 @@ function MedicinesPage({ embedded = false }: { embedded?: boolean }) {
             )}
           </div>
           <div className="flex flex-wrap gap-2">
-            {role === "admin" && (
-              <Link
-                to="/purchase-requests"
-                className="rounded-lg border border-gray-300 px-4 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
-              >
-                Review Purchase Requests
-              </Link>
-            )}
             {canEdit && (
               <>
                 <Link
-                  to="/purchase-requests?new=1&type=new"
+                  to={embedded ? "/dashboard?view=inventory-labels" : "/inventory-labels"}
+                  className="rounded-lg border border-slate-200 px-4 py-2.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
+                >
+                  Manage Labels
+                </Link>
+                <Link
+                  to={embedded ? "/dashboard?view=purchase-requests&new=1&type=new" : "/purchase-requests?new=1&type=new"}
                   className="rounded-lg border border-blue-200 bg-blue-50 px-4 py-2.5 text-sm font-medium text-blue-700 hover:bg-blue-100"
                 >
-                  Request New Medicine
+                  Request New Item
                 </Link>
                 <button
                   type="button"
@@ -324,7 +344,9 @@ function MedicinesPage({ embedded = false }: { embedded?: boolean }) {
                         Receive Stock
                       </button>
                       <Link
-                        to={`/purchase-requests?new=1&medicineId=${medicine._id}`}
+                        to={embedded
+                          ? `/dashboard?view=purchase-requests&new=1&medicineId=${medicine._id}`
+                          : `/purchase-requests?new=1&medicineId=${medicine._id}`}
                         className="rounded-lg bg-slate-900 px-3 py-2 text-xs font-medium text-white hover:bg-slate-800"
                       >
                         Request Restock
@@ -350,7 +372,7 @@ function MedicinesPage({ embedded = false }: { embedded?: boolean }) {
                 type="search"
                 value={search}
                 onChange={(event) => setSearch(event.target.value)}
-                placeholder="Search name, category, or supplier..."
+                placeholder="Search name, section, category, or supplier..."
                 className="input lg:max-w-sm"
               />
             </div>
@@ -390,17 +412,28 @@ function MedicinesPage({ embedded = false }: { embedded?: boolean }) {
           ) : (
             <>
               <div className="divide-y divide-gray-100 md:hidden">
-                {filteredMedicines.map((medicine) => (
-                  <InventoryMobileCard
-                    key={medicine._id}
-                    medicine={medicine}
-                    canEdit={canEdit}
-                    low={isLowStock(medicine)}
-                    expired={isExpired(medicine)}
-                    expiring={isExpiringSoon(medicine)}
-                    onEdit={openEdit}
-                    onBatch={openBatch}
-                  />
+                {medicineGroups.map((group) => (
+                  <section key={group.label}>
+                    <h4 className="border-y border-slate-300 bg-slate-100 px-4 py-2 text-xs font-bold uppercase tracking-wide text-slate-700">
+                      <span className="mr-2 inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: labelDetails(group.label)?.color ?? "#64748b" }} />
+                      {group.label}
+                      {labelDetails(group.label)?.description && <span className="ml-2 normal-case font-normal text-slate-500">— {labelDetails(group.label)?.description}</span>}
+                    </h4>
+                    <div className="divide-y divide-gray-100">
+                      {group.items.map((medicine) => (
+                        <InventoryMobileCard
+                          key={medicine._id}
+                          medicine={medicine}
+                          canEdit={canEdit}
+                          low={isLowStock(medicine)}
+                          expired={isExpired(medicine)}
+                          expiring={isExpiringSoon(medicine)}
+                          onEdit={openEdit}
+                          onBatch={openBatch}
+                        />
+                      ))}
+                    </div>
+                  </section>
                 ))}
               </div>
               <div className="hidden overflow-x-auto md:block">
@@ -417,30 +450,45 @@ function MedicinesPage({ embedded = false }: { embedded?: boolean }) {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
-                    {filteredMedicines.map((medicine) => (
-                      <tr key={medicine._id} className="hover:bg-gray-50">
-                        <td className="px-5 py-4">
-                          <p className="font-medium text-gray-900">{medicine.name}</p>
-                          <p className="text-xs text-gray-400">{medicine.supplier || "No supplier recorded"}</p>
-                        </td>
-                        <td className="px-5 py-4 text-gray-600">{medicine.category || "Uncategorized"}</td>
-                        <td className="px-5 py-4 font-medium">{medicine.quantity} {medicine.unit}</td>
-                        <td className="px-5 py-4 text-gray-600">{medicine.lowStockThreshold} {medicine.unit}</td>
-                        <td className="px-5 py-4 text-gray-600">{formatDate(medicine.expiryDate)}</td>
-                        <td className="px-5 py-4">
-                          <InventoryStatus
-                            low={isLowStock(medicine)}
-                            expired={isExpired(medicine)}
-                            expiring={isExpiringSoon(medicine)}
-                          />
-                        </td>
-                        {canEdit && (
-                          <td className="whitespace-nowrap px-5 py-4">
-                            <button type="button" onClick={() => openEdit(medicine)} className="text-xs font-medium text-gray-600 hover:text-gray-900">Edit</button>
-                            <button type="button" onClick={() => openBatch(medicine)} className="ml-3 text-xs font-medium text-blue-600 hover:text-blue-800">Receive Stock</button>
-                          </td>
-                        )}
-                      </tr>
+                    {medicineGroups.map((group) => (
+                      <Fragment key={group.label}>
+                        <tr>
+                          <th
+                            colSpan={canEdit ? 7 : 6}
+                            scope="rowgroup"
+                            className="border-y border-slate-300 bg-slate-100 px-5 py-2 text-center text-xs font-bold uppercase tracking-wide text-slate-700"
+                          >
+                            <span className="mr-2 inline-block h-2.5 w-2.5 rounded-full" style={{ backgroundColor: labelDetails(group.label)?.color ?? "#64748b" }} />
+                            {group.label}
+                            {labelDetails(group.label)?.description && <span className="ml-2 normal-case font-normal text-slate-500">— {labelDetails(group.label)?.description}</span>}
+                          </th>
+                        </tr>
+                        {group.items.map((medicine) => (
+                          <tr key={medicine._id} className="hover:bg-gray-50">
+                            <td className="px-5 py-4">
+                              <p className="font-medium text-gray-900">{medicine.name}</p>
+                              <p className="text-xs text-gray-400">{medicine.supplier || "No supplier recorded"}</p>
+                            </td>
+                            <td className="px-5 py-4 text-gray-600">{medicine.category || "Uncategorized"}</td>
+                            <td className="px-5 py-4 font-medium">{medicine.quantity} {medicine.unit}</td>
+                            <td className="px-5 py-4 text-gray-600">{medicine.lowStockThreshold} {medicine.unit}</td>
+                            <td className="px-5 py-4 text-gray-600">{formatDate(medicine.expiryDate)}</td>
+                            <td className="px-5 py-4">
+                              <InventoryStatus
+                                low={isLowStock(medicine)}
+                                expired={isExpired(medicine)}
+                                expiring={isExpiringSoon(medicine)}
+                              />
+                            </td>
+                            {canEdit && (
+                              <td className="whitespace-nowrap px-5 py-4">
+                                <button type="button" onClick={() => openEdit(medicine)} className="text-xs font-medium text-gray-600 hover:text-gray-900">Edit</button>
+                                <button type="button" onClick={() => openBatch(medicine)} className="ml-3 text-xs font-medium text-blue-600 hover:text-blue-800">Receive Stock</button>
+                              </td>
+                            )}
+                          </tr>
+                        ))}
+                      </Fragment>
                     ))}
                   </tbody>
                 </table>
@@ -454,8 +502,8 @@ function MedicinesPage({ embedded = false }: { embedded?: boolean }) {
         <Modal title={editTarget ? "Edit Inventory Item" : "Record Received Inventory Item"} onClose={() => setShowModal(false)} closeDisabled={saving}>
           {!editTarget && (
             <p className="mb-4 rounded-lg bg-blue-50 p-3 text-sm text-blue-800">
-              Use this form only after medicine has been received. To ask for approval before buying,
-              use “Request New Medicine.”
+              Use this form only after an inventory item has been received. To ask for approval before buying,
+              use “Request New Item.”
             </p>
           )}
           {formError && <p className="mb-3 text-sm text-red-500">{formError}</p>}
@@ -468,18 +516,40 @@ function MedicinesPage({ embedded = false }: { embedded?: boolean }) {
               <InventoryField label="Category" error={fieldErrors.category}>
                 <input value={form.category} onChange={(event) => setField("category", event.target.value)} placeholder="e.g. Analgesic" className={`input ${fieldErrors.category ? "input-error" : ""}`} />
               </InventoryField>
-              <InventoryField label="Quantity *" error={fieldErrors.quantity}>
-                <input type="number" min={0} value={form.quantity} onChange={(event) => setField("quantity", event.target.value)} required className={`input ${fieldErrors.quantity ? "input-error" : ""}`} />
+              <InventoryField label="Inventory Section / Label" error={fieldErrors.inventorySection}>
+                <InventorySectionSelector
+                  value={form.inventorySection}
+                  onChange={(value) => setField("inventorySection", value)}
+                  existingLabels={medicines.map((medicine) => medicine.inventorySection)}
+                  error={Boolean(fieldErrors.inventorySection)}
+                />
               </InventoryField>
+              {!editTarget && (
+                <InventoryField label="Quantity *" error={fieldErrors.quantity}>
+                  <input type="number" min={0} value={form.quantity} onChange={(event) => setField("quantity", event.target.value)} required className={`input ${fieldErrors.quantity ? "input-error" : ""}`} />
+                </InventoryField>
+              )}
               <InventoryField label="Unit *" error={fieldErrors.unit}>
                 <input value={form.unit} onChange={(event) => setField("unit", event.target.value)} placeholder="tablets, bottles, ml" required className={`input ${fieldErrors.unit ? "input-error" : ""}`} />
               </InventoryField>
               <InventoryField label="Reorder Level *" error={fieldErrors.lowStockThreshold}>
                 <input type="number" min={0} value={form.lowStockThreshold} onChange={(event) => setField("lowStockThreshold", event.target.value)} required className={`input ${fieldErrors.lowStockThreshold ? "input-error" : ""}`} />
               </InventoryField>
-              <InventoryField label="Expiry Date" error={fieldErrors.expiryDate}>
-                <input type="date" value={form.expiryDate} onChange={(event) => setField("expiryDate", event.target.value)} className={`input ${fieldErrors.expiryDate ? "input-error" : ""}`} />
-              </InventoryField>
+              {!editTarget && (
+                <InventoryField label="Expiry Date" error={fieldErrors.expiryDate}>
+                  <input type="date" value={form.expiryDate} onChange={(event) => setField("expiryDate", event.target.value)} required={Number(form.quantity) > 0} className={`input ${fieldErrors.expiryDate ? "input-error" : ""}`} />
+                </InventoryField>
+              )}
+              {!editTarget && (
+                <InventoryField label="Batch Number *" error={fieldErrors.batchNumber}>
+                  <input value={form.batchNumber} onChange={(event) => setField("batchNumber", event.target.value)} required className={`input ${fieldErrors.batchNumber ? "input-error" : ""}`} />
+                </InventoryField>
+              )}
+              {!editTarget && (
+                <InventoryField label="Date Received *" error={fieldErrors.dateReceived}>
+                  <input type="date" value={form.dateReceived} onChange={(event) => setField("dateReceived", event.target.value)} required className={`input ${fieldErrors.dateReceived ? "input-error" : ""}`} />
+                </InventoryField>
+              )}
             </div>
             <InventoryField label="Supplier" error={fieldErrors.supplier}>
               <input value={form.supplier} onChange={(event) => setField("supplier", event.target.value)} className={`input ${fieldErrors.supplier ? "input-error" : ""}`} />
@@ -495,7 +565,7 @@ function MedicinesPage({ embedded = false }: { embedded?: boolean }) {
             <InventoryField label="Batch Number *"><input required value={batchForm.batchNumber} onChange={(event) => setBatchForm({ ...batchForm, batchNumber: event.target.value })} className="input" /></InventoryField>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <InventoryField label="Quantity Received *"><input required type="number" min={1} value={batchForm.quantityReceived} onChange={(event) => setBatchForm({ ...batchForm, quantityReceived: event.target.value })} className="input" /></InventoryField>
-              <InventoryField label="Expiry Date"><input type="date" value={batchForm.expiryDate} onChange={(event) => setBatchForm({ ...batchForm, expiryDate: event.target.value })} className="input" /></InventoryField>
+              <InventoryField label="Expiry Date *"><input required type="date" value={batchForm.expiryDate} onChange={(event) => setBatchForm({ ...batchForm, expiryDate: event.target.value })} className="input" /></InventoryField>
             </div>
             <InventoryField label="Supplier"><input value={batchForm.supplier} onChange={(event) => setBatchForm({ ...batchForm, supplier: event.target.value })} className="input" /></InventoryField>
             <InventoryField label="Delivery Notes"><textarea rows={3} value={batchForm.notes} onChange={(event) => setBatchForm({ ...batchForm, notes: event.target.value })} className="input" /></InventoryField>
@@ -550,7 +620,9 @@ function InventoryMobileCard({ medicine, canEdit, low, expired, expiring, onEdit
       <div className="flex items-start justify-between gap-3">
         <div>
           <p className="font-medium text-gray-900">{medicine.name}</p>
-          <p className="text-xs text-gray-500">{medicine.category || "Uncategorized"}</p>
+          <p className="text-xs text-gray-500">
+            {inventorySectionLabel(medicine.inventorySection)} · {medicine.category || "Uncategorized"}
+          </p>
         </div>
         <InventoryStatus low={low} expired={expired} expiring={expiring} />
       </div>
