@@ -13,6 +13,7 @@ Built with Node.js, Express, TypeScript, and MongoDB (Mongoose).
 - **Frontend (Vercel):** https://clinic-frontend-zx67-git-nursedashboard-scms2.vercel.app/
 - **Backend (Render):** https://clinicbackend-1-slng.onrender.com
 - **Database:** MongoDB Atlas
+- **Documentation:** https://docs.google.com/document/d/1fRrNwHpGjm-V5Kex2wx7CkTS4nTEJTsNZ2duiJtl1vw/edit?usp=sharing
 
 The frontend calls the backend through a Vercel rewrite (`/api/:path*` →
 the Render URL above), so from the browser's perspective all requests are
